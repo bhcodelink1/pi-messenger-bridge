@@ -17,6 +17,7 @@ https://github.com/user-attachments/assets/cd64360e-e8cd-4820-a67f-bd127c5d6035
 - 📊 Live status widget (toggleable)
 - 💾 Persistent config (auth state, auto-connect, widget preference)
 - 🔧 Tool call visibility for remote users
+- ⌨️ Typing indicator that keeps refreshing while tools run
 - 📝 Multi-turn conversation support
 - 🔑 Secure permissions (chmod 600 for config files, 700 for directories)
 
@@ -136,6 +137,8 @@ The user enters the code in the bot chat to become a trusted user.
 | `/msg-bridge configure <platform> [token]` | Set transport credentials via CLI |
 | `/msg-bridge widget` | Toggle status widget on/off |
 | `/msg-bridge toggletools` | Toggle tool call visibility in remote messages |
+| `/msg-bridge typing` | Toggle the typing indicator on/off |
+| `/msg-bridge typing <seconds>` | Set the typing refresh interval (1-20, `0` turns it off) |
 | `/msg-bridge help` | Show command reference |
 
 ### Admin commands (in DM with the bot)
@@ -151,6 +154,8 @@ Trusted users can DM the bot directly to manage state. Reply with `/help` for th
 | `/enable <chatId> <all\|mentions\|trusted-only>` | Enable a channel |
 | `/disable <chatId>` | Disable a channel |
 | `/toggletools` | Toggle tool call visibility in replies |
+| `/typing` | Toggle the typing indicator |
+| `/typing <seconds>` | Set the typing refresh interval (1-20, `0` turns it off) |
 
 ## Configuration
 
@@ -170,9 +175,32 @@ Example config:
   },
   "autoConnect": true,
   "showWidget": true,
+  "typingIndicator": true,
+  "typingRefreshMs": 4000,
   "debug": false
 }
 ```
+
+### Typing indicator
+
+The bridge shows a typing indicator while pi works on a request that came from a
+messenger. Messengers expire that signal on their own, roughly 5 seconds on
+Telegram, 3 seconds on WhatsApp, and 10 seconds on Matrix and Discord, so a
+single ping goes silent during a long tool run.
+
+The bridge keeps the indicator alive instead:
+
+- `turn_start` starts the heartbeat and sends the first indicator.
+- `tool_execution_start` pings again and resets the timer, so every tool call
+  restarts the indicator.
+- A refresh timer re-sends the indicator every `typingRefreshMs` milliseconds
+  (default 4000, clamped to 1000-20000) until the answer is delivered.
+- `agent_end` and any send failure three times in a row stop it, so a dead
+  transport is not hammered and no timer outlives the run.
+
+Set `"typingIndicator": false` to send one indicator per turn like older
+versions, or `"typingRefreshMs": 0` to keep the tool-call pings without a timer.
+Slack has no typing indicator for bots, so nothing is sent there.
 
 ## Environment Variables
 

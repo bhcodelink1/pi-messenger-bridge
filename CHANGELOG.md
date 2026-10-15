@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Typing indicator heartbeat — the indicator now survives long tool runs. `turn_start` starts it, `tool_execution_start` re-pings and resets the timer, and a refresh timer re-sends every `typingRefreshMs` (default 4000 ms, clamped to 1000-20000) until the answer is delivered. Previously one indicator was sent per turn, which Telegram, WhatsApp, and Discord cleared after 3-10 seconds while a build or fetch was still running
+- `typingIndicator` and `typingRefreshMs` config keys, `/msg-bridge typing [seconds]` pi command, matching `/typing [seconds]` DM admin command, and a Typing entry in the `/msg-bridge` interactive menu
+
 ## [0.4.0] - 2026-05-09
 
 ### Added

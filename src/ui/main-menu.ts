@@ -13,6 +13,7 @@ import { MatrixProvider } from "../transports/matrix.js";
 import { SlackProvider } from "../transports/slack.js";
 import { TelegramProvider } from "../transports/telegram.js";
 import { WhatsAppProvider } from "../transports/whatsapp.js";
+import { clampTypingRefreshMs } from "../typing.js";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -55,7 +56,9 @@ function showHelp(mctx: MenuContext): void {
     "  /msg-bridge connect               — connect all transports\n" +
     "  /msg-bridge disconnect            — disconnect all transports\n" +
     "  /msg-bridge configure <platform>  — set up a transport\n" +
-    "  /msg-bridge widget                — toggle status widget",
+    "  /msg-bridge widget                — toggle status widget\n" +
+    "  /msg-bridge toggletools           — toggle tool call visibility\n" +
+    "  /msg-bridge typing [seconds]      — typing indicator on/off or refresh interval",
     "info",
   );
 }
@@ -221,6 +224,48 @@ function doToggleWidget(mctx: MenuContext): void {
   mctx.updateWidget();
 }
 
+function describeTyping(cfg: ReturnType<typeof loadConfig>): string {
+  if (cfg.typingIndicator === false) return "off";
+  return `on, refreshed every ${clampTypingRefreshMs(cfg.typingRefreshMs) / 1000}s`;
+}
+
+async function doTyping(mctx: MenuContext): Promise<void> {
+  const current = loadConfig();
+  const enabled = current.typingIndicator !== false;
+
+  const choice = await mctx.ui.select(`Typing indicator — ${describeTyping(current)}`, [
+    enabled ? "Turn off" : "Turn on",
+    "Set refresh interval",
+  ]);
+  if (!choice) return;
+
+  const cfg = loadConfig();
+
+  if (choice === "Set refresh interval") {
+    const answer = await mctx.ui.input("Refresh interval in seconds (1-20, 0 = off)");
+    if (answer === undefined) return;
+
+    const seconds = Number.parseFloat(answer);
+    if (!Number.isFinite(seconds)) {
+      mctx.ui.notify("Enter a number of seconds, or 0 to turn the indicator off", "error");
+      return;
+    }
+
+    if (seconds <= 0) {
+      cfg.typingIndicator = false;
+      delete cfg.typingRefreshMs;
+    } else {
+      cfg.typingIndicator = true;
+      cfg.typingRefreshMs = clampTypingRefreshMs(seconds * 1000);
+    }
+  } else {
+    cfg.typingIndicator = cfg.typingIndicator === false;
+  }
+
+  saveConfig(cfg);
+  mctx.ui.notify(`⌨️ Typing indicator ${describeTyping(cfg)}`, "info");
+}
+
 // ── Main menu ───────────────────────────────────────────────────────────────
 
 export async function openMainMenu(mctx: MenuContext): Promise<void> {
@@ -234,6 +279,7 @@ export async function openMainMenu(mctx: MenuContext): Promise<void> {
       anyConnected ? "Disconnect" : "Connect",
       "Configure",
       "Widget",
+      "Typing",
       "Help",
     ];
 
@@ -252,6 +298,9 @@ export async function openMainMenu(mctx: MenuContext): Promise<void> {
         break;
       case "Widget":
         doToggleWidget(mctx);
+        break;
+      case "Typing":
+        await doTyping(mctx);
         break;
       case "Help":
         showHelp(mctx);

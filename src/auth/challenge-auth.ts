@@ -4,6 +4,7 @@
  */
 
 import { loadConfig, saveConfig } from "../config.js";
+import { clampTypingRefreshMs } from "../typing.js";
 
 interface ChallengeData {
   code: string;
@@ -277,6 +278,33 @@ export class ChallengeAuth {
         return true;
       }
 
+      case "/typing": {
+        const cfg = loadConfig();
+        if (parts.length >= 2) {
+          const seconds = Number.parseFloat(parts[1]);
+          if (!Number.isFinite(seconds)) {
+            await sendMessage("Usage: /typing [seconds] — 0 turns the indicator off");
+            return true;
+          }
+          if (seconds <= 0) {
+            cfg.typingIndicator = false;
+            delete cfg.typingRefreshMs;
+          } else {
+            cfg.typingIndicator = true;
+            cfg.typingRefreshMs = clampTypingRefreshMs(seconds * 1000);
+          }
+        } else {
+          cfg.typingIndicator = cfg.typingIndicator === false;
+        }
+        saveConfig(cfg);
+        const typingState =
+          cfg.typingIndicator === false
+            ? "off"
+            : `on, refreshed every ${clampTypingRefreshMs(cfg.typingRefreshMs) / 1000}s`;
+        await sendMessage(`⌨️ Typing indicator ${typingState}`);
+        return true;
+      }
+
       case "/revoke": {
         if (parts.length < 2) {
           await sendMessage("Usage: /revoke <userId> or /revoke <transport:userId>");
@@ -382,6 +410,8 @@ export class ChallengeAuth {
   Modes: \`all\`, \`mentions\`, \`trusted-only\`
 • \`/disable <chatId>\` — Disable a channel
 • \`/toggletools\` — Toggle tool call visibility in replies
+• \`/typing\` — Toggle the typing indicator
+• \`/typing <seconds>\` — Set its refresh interval (1-20, 0 = off)
 
 *Authentication:*
 • First DM to bot → 6-digit code shown in terminal

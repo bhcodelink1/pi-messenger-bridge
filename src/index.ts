@@ -14,6 +14,7 @@ import { SlackProvider } from "./transports/slack.js";
 import { TelegramProvider } from "./transports/telegram.js";
 import { WhatsAppProvider } from "./transports/whatsapp.js";
 import type { PendingRemoteChat, TransportStatus } from "./types.js";
+import { clampTypingRefreshMs, TypingHeartbeat } from "./typing.js";
 import { openMainMenu } from "./ui/main-menu.js";
 import { createStatusWidget } from "./ui/status-widget.js";
 
@@ -26,6 +27,22 @@ export default function (pi: ExtensionAPI): void {
   let pendingRemoteChat: PendingRemoteChat | null = null;
   let auth: ChallengeAuth;
   let ctx: ExtensionContext;
+
+  const typingHeartbeat = new TypingHeartbeat(transportManager, () => {
+    const config = loadConfig();
+    if (config.typingIndicator === false) return 0;
+    return config.typingRefreshMs;
+  });
+
+  /**
+   * The chat to keep a typing indicator alive for, or null when indicators are
+   * disabled or no remote request is in flight.
+   */
+  function typingTarget(): PendingRemoteChat | null {
+    if (!pendingRemoteChat) return null;
+    if (loadConfig().typingIndicator === false) return null;
+    return pendingRemoteChat;
+  }
 
   /**
    * Update status widget
@@ -195,18 +212,25 @@ export default function (pi: ExtensionAPI): void {
   });
 
   /**
-   * Handle turn start - send typing indicator
+   * Handle turn start - start the typing indicator heartbeat
    */
   pi.on("turn_start", async (_event, _context) => {
-    if (pendingRemoteChat) {
-      try {
-        await transportManager.sendTyping(
-          pendingRemoteChat.chatId,
-          pendingRemoteChat.transport
-        );
-      } catch (_err) {
-        // Ignore typing indicator errors
-      }
+    const target = typingTarget();
+    if (target) {
+      typingHeartbeat.start(target);
+    }
+  });
+
+  /**
+   * Handle tool start - ping the indicator again and reschedule the refresh.
+   * pi runs tools inside the turn, after `turn_start`, so without this the
+   * indicator from turn start has usually already expired by the time a tool
+   * begins.
+   */
+  pi.on("tool_execution_start", async (_event, _context) => {
+    const target = typingTarget();
+    if (target) {
+      typingHeartbeat.touch(target);
     }
   });
 
@@ -248,6 +272,7 @@ export default function (pi: ExtensionAPI): void {
 
       if (!hasPendingTools) {
         pendingRemoteChat = null;
+        typingHeartbeat.stop();
       }
     } catch (err) {
       const transport = pendingRemoteChat?.transport ?? "unknown";
@@ -256,13 +281,24 @@ export default function (pi: ExtensionAPI): void {
         "error"
       );
       pendingRemoteChat = null;
+      typingHeartbeat.stop();
     }
+  });
+
+  /**
+   * Stop the heartbeat when the run finishes or is aborted. The final answer
+   * already stopped it in `turn_end`; this is the backstop for aborts, errors,
+   * and turns that end without a sendable message.
+   */
+  pi.on("agent_end", async (_event, _context) => {
+    typingHeartbeat.stop();
   });
 
   /**
    * Cleanup on session exit — release lock and disconnect transports
    */
   pi.on("session_shutdown", async (_event, _context) => {
+    typingHeartbeat.stop();
     await transportManager.disconnectAll();
     releaseLock();
   });
@@ -271,7 +307,8 @@ export default function (pi: ExtensionAPI): void {
    * /msg-bridge command - show status or manage connections
    */
   pi.registerCommand("msg-bridge", {
-    description: "Manage remote messenger connections (help|status|connect|disconnect|configure|widget)",
+    description:
+      "Manage remote messenger connections (help|status|connect|disconnect|configure|widget|typing)",
     handler: async (args: string, context) => {
       const parts = args.trim().split(/\s+/).filter(p => p.length > 0);
       const subcommand = parts[0] || "";
@@ -305,6 +342,8 @@ export default function (pi: ExtensionAPI): void {
           "                              Configure Matrix (Element X, etc)",
           "/msg-bridge widget            Toggle status widget on/off",
           "/msg-bridge toggletools       Toggle tool call visibility",
+          "/msg-bridge typing            Toggle typing indicator on/off",
+          "/msg-bridge typing <seconds>  Typing refresh interval (1-20, 0 = off)",
           "",
           "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         ];
@@ -536,6 +575,46 @@ export default function (pi: ExtensionAPI): void {
         context.ui.notify(`🔧 Tool calls ${toolState} in remote messages`, "info");
         break;
       }
+
+      case "typing": {
+        const cfg4 = loadConfig();
+        const arg = parts[1];
+
+        if (arg === undefined) {
+          cfg4.typingIndicator = cfg4.typingIndicator === false;
+          saveConfig(cfg4);
+          if (cfg4.typingIndicator === false) typingHeartbeat.stop();
+          const state = cfg4.typingIndicator === false ? "off" : "on";
+          context.ui.notify(`⌨️  Typing indicator ${state}`, "info");
+          break;
+        }
+
+        const seconds = Number.parseFloat(arg);
+        if (!Number.isFinite(seconds)) {
+          context.ui.notify("Usage: /msg-bridge typing [seconds] — 0 turns the indicator off", "error");
+          return;
+        }
+
+        if (seconds <= 0) {
+          cfg4.typingIndicator = false;
+          delete cfg4.typingRefreshMs;
+          saveConfig(cfg4);
+          typingHeartbeat.stop();
+          context.ui.notify("⌨️  Typing indicator off", "info");
+          break;
+        }
+
+        const ms = clampTypingRefreshMs(seconds * 1000);
+        cfg4.typingIndicator = true;
+        cfg4.typingRefreshMs = ms;
+        saveConfig(cfg4);
+        context.ui.notify(
+          `⌨️  Typing indicator on, refreshed every ${ms / 1000}s`,
+          "info"
+        );
+        break;
+      }
+
       default:
         context.ui.notify(`Unknown subcommand: ${subcommand}. Run /msg-bridge help`, "warning");
         break;

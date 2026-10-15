@@ -50,6 +50,15 @@ export interface MsgBridgeConfig {
     channels?: Record<string, { enabled: boolean; mode: "all" | "mentions" | "trusted-only" }>;
   };
   hideToolCalls?: boolean;
+  /** Show a typing indicator while pi works on a remote request (default true). */
+  typingIndicator?: boolean;
+  /**
+   * How often to re-send the typing indicator, in milliseconds. Messengers
+   * expire the indicator on their own (Telegram ~5s, WhatsApp 3s, Matrix and
+   * Discord ~10s), so a long tool run needs refreshes. Clamped to 1000-20000;
+   * 0 or negative means one-shot with no refresh timer. Defaults to 4000.
+   */
+  typingRefreshMs?: number;
   autoConnect?: boolean;
   showWidget?: boolean;
   debug?: boolean;
