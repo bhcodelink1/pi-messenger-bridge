@@ -1,3 +1,10 @@
+import { withDeadline } from "../async-util.js";
+/**
+ * Ceiling on the whole teardown. Pi awaits `session_shutdown` handlers before
+ * it creates the next session, so an unreachable transport must not be able to
+ * freeze session replacement.
+ */
+const DISCONNECT_DEADLINE_MS = 1000;
 /**
  * Manages multiple transport providers and routes messages
  */
@@ -45,11 +52,18 @@ export class TransportManager {
         await Promise.all(connections);
     }
     /**
-     * Disconnect all transports
+     * Disconnect all transports, giving up after `deadlineMs`.
+     *
+     * Transports are disconnected concurrently and a transport that cannot finish
+     * in time is left to complete in the background.
      */
-    async disconnectAll() {
-        const disconnections = Array.from(this.transports.values()).map((t) => t.disconnect());
-        await Promise.allSettled(disconnections);
+    async disconnectAll(deadlineMs = DISCONNECT_DEADLINE_MS) {
+        const disconnections = Array.from(this.transports.values()).map((t) => t.disconnect().catch((err) => {
+            console.warn(`[msg-bridge] ${t.type} disconnect failed: ${err.message}`);
+        }));
+        if (disconnections.length === 0)
+            return;
+        await withDeadline(Promise.allSettled(disconnections), deadlineMs);
     }
     /**
      * Send a message to a specific chat via a specific transport

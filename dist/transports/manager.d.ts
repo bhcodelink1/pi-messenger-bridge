@@ -24,9 +24,12 @@ export declare class TransportManager {
      */
     connectAll(): Promise<void>;
     /**
-     * Disconnect all transports
+     * Disconnect all transports, giving up after `deadlineMs`.
+     *
+     * Transports are disconnected concurrently and a transport that cannot finish
+     * in time is left to complete in the background.
      */
-    disconnectAll(): Promise<void>;
+    disconnectAll(deadlineMs?: number): Promise<void>;
     /**
      * Send a message to a specific chat via a specific transport
      */

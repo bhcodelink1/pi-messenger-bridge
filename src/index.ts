@@ -1,15 +1,14 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { ChallengeAuth } from "./auth/challenge-auth.js";
 import { loadConfig, saveConfig } from "./config.js";
 import { splitMessage } from "./formatting.js";
 import { acquireLock, releaseLock } from "./lock.js";
 import { planTurnReply } from "./reply-routing.js";
+import { getRuntime } from "./runtime.js";
 import { DiscordProvider } from "./transports/discord.js";
-import { TransportManager } from "./transports/manager.js";
 import { MatrixProvider } from "./transports/matrix.js";
 import { SlackProvider } from "./transports/slack.js";
 import { TelegramProvider } from "./transports/telegram.js";
@@ -24,17 +23,29 @@ import { createStatusWidget } from "./ui/status-widget.js";
  * Bridges messenger apps (Telegram, WhatsApp, Slack, Discord) into pi
  */
 export default function (pi: ExtensionAPI): void {
-  const transportManager = new TransportManager();
-  let pendingRemoteChat: PendingRemoteChat | null = null;
+  // Process-wide state. Pi re-runs this factory on every session replacement,
+  // so anything holding a network connection lives here and not in a local.
+  const runtime = getRuntime();
+  const transportManager = runtime.transportManager;
+  const auth = runtime.auth;
   /**
-   * The last chat a message arrived from. `pendingRemoteChat` is cleared as soon
-   * as a turn finishes answering it, which drops any later turn that produces
-   * the real result. This one is never cleared, so those turns still have a
-   * destination. See `planTurnReply`.
+   * The request currently in flight, which is per-session. The chat to keep
+   * replying to once it is answered is `runtime.stickyRemoteChat`, which
+   * survives session replacement. See `planTurnReply`.
    */
-  let stickyRemoteChat: PendingRemoteChat | null = null;
-  let auth: ChallengeAuth;
-  let ctx: ExtensionContext;
+  let pendingRemoteChat: PendingRemoteChat | null = null;
+
+  /**
+   * Notify the terminal of the session that currently owns the bridge. Silent
+   * when no session owns it, which is the case between a shutdown and the
+   * `session_start` that follows it.
+   */
+  function notify(
+    message: string,
+    level: "info" | "warning" | "error" = "info"
+  ): void {
+    runtime.ctx?.ui.notify(message, level);
+  }
 
   const typingHeartbeat = new TypingHeartbeat(transportManager, () => {
     const config = loadConfig();
@@ -56,10 +67,13 @@ export default function (pi: ExtensionAPI): void {
    * Update status widget
    */
   function updateWidget(): void {
+    const context = runtime.ctx;
+    if (!context) return;
+
     const config = loadConfig();
 
     if (config.showWidget === false) {
-      ctx.ui.setWidget("msg-bridge-status", undefined);
+      context.ui.setWidget("msg-bridge-status", undefined);
       return;
     }
 
@@ -73,149 +87,172 @@ export default function (pi: ExtensionAPI): void {
 
     const widget = createStatusWidget(transports, stats.usersByTransport);
     if (widget) {
-      ctx.ui.setWidget("msg-bridge-status", [widget]);
+      context.ui.setWidget("msg-bridge-status", [widget]);
     } else {
-      ctx.ui.setWidget("msg-bridge-status", undefined);
+      context.ui.setWidget("msg-bridge-status", undefined);
     }
   }
 
   /**
-   * Save auth state to config
+   * Register the transports named by the config and connect them, in the
+   * background so a slow homeserver never delays session start.
    */
-  function saveAuthState(): void {
-    const config = loadConfig();
-    config.auth = auth.exportConfig();
-    saveConfig(config);
+  async function initTransports(config: ReturnType<typeof loadConfig>): Promise<void> {
+    transportManager.onMessage((msg) => {
+      if (!runtime.inboundSink) {
+        console.warn(
+          `[msg-bridge] no live pi session, dropped inbound ${msg.transport} message`
+        );
+        return;
+      }
+      runtime.inboundSink(msg);
+    });
+
+    transportManager.onError((err, transport) => {
+      notify(`❌ ${transport} error: ${err.message}`, "error");
+    });
+
+    const transportPromises: Promise<void>[] = [];
+
+    if (config.telegram?.token) {
+      transportPromises.push(
+        Promise.resolve().then(() => {
+          const telegramProvider = new TelegramProvider(config.telegram!.token, auth);
+          transportManager.addTransport(telegramProvider);
+        })
+      );
+    }
+
+    if (config.whatsapp) {
+      const whatsappAuthPath = config.whatsapp.authPath || path.join(
+        os.homedir(),
+        ".pi",
+        "msg-bridge-whatsapp-auth"
+      );
+
+      const credsPath = path.join(whatsappAuthPath, "creds.json");
+      if (fs.existsSync(credsPath)) {
+        transportPromises.push(
+          Promise.resolve().then(() => {
+            const whatsappConfig = { ...config.whatsapp!, debug: config.debug };
+            const whatsappProvider = new WhatsAppProvider(whatsappConfig, auth);
+            transportManager.addTransport(whatsappProvider);
+          })
+        );
+      } else {
+        delete config.whatsapp;
+        saveConfig(config);
+      }
+    }
+
+    if (config.slack?.botToken && config.slack?.appToken) {
+      transportPromises.push(
+        Promise.resolve().then(() => {
+          const slackProvider = new SlackProvider(config.slack!, auth);
+          transportManager.addTransport(slackProvider);
+        })
+      );
+    }
+
+    if (config.discord?.token) {
+      transportPromises.push(
+        Promise.resolve().then(() => {
+          const discordProvider = new DiscordProvider(config.discord!, auth);
+          transportManager.addTransport(discordProvider);
+        })
+      );
+    }
+
+    if (config.matrix?.homeserverUrl && config.matrix?.accessToken) {
+      transportPromises.push(
+        Promise.resolve().then(() => {
+          const matrixProvider = new MatrixProvider(config.matrix!, auth);
+          transportManager.addTransport(matrixProvider);
+        })
+      );
+    }
+
+    await Promise.all(transportPromises);
+
+    await connectAll(config);
   }
 
   /**
-   * Initialize extension
+   * Connect every registered transport, honouring the single-instance lock.
+   */
+  async function connectAll(config: ReturnType<typeof loadConfig>): Promise<void> {
+    const transports = transportManager.getAllTransports();
+    if (transports.length === 0 || config.autoConnect === false) return;
+
+    if (!acquireLock()) {
+      notify("ℹ️ msg-bridge: another instance is already connected — skipping auto-connect");
+      return;
+    }
+
+    try {
+      await transportManager.connectAll();
+      updateWidget();
+    } catch (err) {
+      releaseLock();
+      notify(`⚠️ Some transports failed to connect: ${(err as Error).message}`, "warning");
+    }
+  }
+
+  /**
+   * Re-dial after the transports were already built. Covers the case where this
+   * process lost the lock to another pi at startup and that pi has since quit,
+   * and the case where the first attempt failed outright.
+   */
+  function redialIdleTransports(config: ReturnType<typeof loadConfig>): void {
+    if (config.autoConnect === false) return;
+    if (transportManager.getAllTransports().length === 0) return;
+    if (transportManager.getStatus().some((s) => s.connected)) return;
+    void connectAll(config).catch((err: Error) => {
+      console.error("Transport re-dial error:", err);
+    });
+  }
+
+  /**
+   * Initialize extension.
+   *
+   * Pi fires this on every session replacement, not only at process start, so
+   * the transports are built once and reused. See runtime.ts.
    */
   pi.on("session_start", async (_event, context) => {
-    ctx = context;
+    runtime.ctx = context;
 
     const config = loadConfig();
-
-    auth = new ChallengeAuth(
-      (code, username) => {
-        ctx.ui.notify(
-          `🔐 Challenge code for @${username}: ${code}`,
-          "info"
-        );
-      },
-      (message, level) => {
-        ctx.ui.notify(message, level);
-      },
-      async (_chatId, _message) => {
-        // Challenge notifications are sent via the transport's sendMessage
-      },
-      saveAuthState
-    );
 
     if (config.auth) {
       auth.loadFromConfig(config.auth);
     }
 
-    // Initialize transports in the background (non-blocking)
-    (async () => {
-      const transportPromises: Promise<void>[] = [];
-
-      if (config.telegram?.token) {
-        transportPromises.push(
-          Promise.resolve().then(() => {
-            const telegramProvider = new TelegramProvider(config.telegram!.token, auth);
-            transportManager.addTransport(telegramProvider);
-          })
-        );
-      }
-
-      if (config.whatsapp) {
-        const whatsappAuthPath = config.whatsapp.authPath || path.join(
-          os.homedir(),
-          ".pi",
-          "msg-bridge-whatsapp-auth"
-        );
-
-        const credsPath = path.join(whatsappAuthPath, "creds.json");
-        if (fs.existsSync(credsPath)) {
-          transportPromises.push(
-            Promise.resolve().then(() => {
-              const whatsappConfig = { ...config.whatsapp!, debug: config.debug };
-              const whatsappProvider = new WhatsAppProvider(whatsappConfig, auth);
-              transportManager.addTransport(whatsappProvider);
-            })
-          );
-        } else {
-          delete config.whatsapp;
-          saveConfig(config);
-        }
-      }
-
-      if (config.slack?.botToken && config.slack?.appToken) {
-        transportPromises.push(
-          Promise.resolve().then(() => {
-            const slackProvider = new SlackProvider(config.slack!, auth);
-            transportManager.addTransport(slackProvider);
-          })
-        );
-      }
-
-      if (config.discord?.token) {
-        transportPromises.push(
-          Promise.resolve().then(() => {
-            const discordProvider = new DiscordProvider(config.discord!, auth);
-            transportManager.addTransport(discordProvider);
-          })
-        );
-      }
-
-      if (config.matrix?.homeserverUrl && config.matrix?.accessToken) {
-        transportPromises.push(
-          Promise.resolve().then(() => {
-            const matrixProvider = new MatrixProvider(config.matrix!, auth);
-            transportManager.addTransport(matrixProvider);
-          })
-        );
-      }
-
-      await Promise.all(transportPromises);
-
-      // Auto-connect if configured
-      const transports = transportManager.getAllTransports();
-      if (transports.length > 0 && config.autoConnect !== false) {
-        if (!acquireLock()) {
-          ctx.ui.notify("ℹ️ msg-bridge: another instance is already connected — skipping auto-connect", "info");
-        } else {
-          try {
-            await transportManager.connectAll();
-            updateWidget();
-          } catch (err) {
-            releaseLock();
-            ctx.ui.notify(`⚠️ Some transports failed to connect: ${(err as Error).message}`, "warning");
-          }
-        }
-      }
-    })().catch(err => {
-      console.error("Transport initialization error:", err);
-      ctx.ui.notify(`❌ Transport initialization failed: ${err.message}`, "error");
-    });
-
-    transportManager.onMessage((msg) => {
+    // Inbound messages have to reach the `sendUserMessage` of the session that
+    // is alive right now. Rebinding the sink here is what makes a message that
+    // arrives after a /new land in the new session.
+    runtime.inboundSink = (msg) => {
       pendingRemoteChat = {
         chatId: msg.chatId,
         transport: msg.transport,
         username: msg.username,
         messageId: msg.messageId,
       };
-      stickyRemoteChat = pendingRemoteChat;
+      runtime.stickyRemoteChat = pendingRemoteChat;
 
       const taggedMessage = `[📱 @${msg.username} via ${msg.transport}]: ${msg.content}`;
       pi.sendUserMessage(taggedMessage, { deliverAs: "followUp" });
-    });
+    };
 
-    transportManager.onError((err, transport) => {
-      ctx.ui.notify(`❌ ${transport} error: ${err.message}`, "error");
-    });
+    if (runtime.transportsBuilt) {
+      redialIdleTransports(config);
+    } else {
+      runtime.transportsBuilt = true;
+      // Initialize transports in the background (non-blocking)
+      void initTransports(config).catch((err: Error) => {
+        console.error("Transport initialization error:", err);
+        notify(`❌ Transport initialization failed: ${err.message}`, "error");
+      });
+    }
 
     updateWidget();
   });
@@ -255,7 +292,7 @@ export default function (pi: ExtensionAPI): void {
     const plan = planTurnReply({
       message: event.message as AssistantMessage,
       pendingRemoteChat,
-      stickyRemoteChat,
+      stickyRemoteChat: runtime.stickyRemoteChat,
       config,
     });
 
@@ -274,7 +311,7 @@ export default function (pi: ExtensionAPI): void {
         typingHeartbeat.stop();
       }
     } catch (err) {
-      ctx.ui.notify(
+      notify(
         `Failed to send response to ${target.transport}: ${(err as Error).message}`,
         "error"
       );
@@ -293,10 +330,22 @@ export default function (pi: ExtensionAPI): void {
   });
 
   /**
-   * Cleanup on session exit — release lock and disconnect transports
+   * Cleanup on session exit.
+   *
+   * Only a real quit tears the connections down. Session replacement (new,
+   * resume, fork, reload) is followed by another `session_start` in the same
+   * process, which rebinds the sink, so disconnecting there meant a full
+   * messenger outage plus a Telegram 409 conflict on the redial for every
+   * /new, /resume, fork and /reload.
    */
-  pi.on("session_shutdown", async (_event, _context) => {
+  pi.on("session_shutdown", async (event, _context) => {
     typingHeartbeat.stop();
+    runtime.inboundSink = null;
+    pendingRemoteChat = null;
+
+    if (event.reason !== "quit") return;
+
+    runtime.ctx = null;
     await transportManager.disconnectAll();
     releaseLock();
   });
@@ -562,11 +611,12 @@ export default function (pi: ExtensionAPI): void {
         lines.push("");
         lines.push(`Channels: ${stats.channels}`);
         const stickyOn = loadConfig().stickyReplies !== false;
+        const stickyChat = runtime.stickyRemoteChat;
         lines.push(
           `Sticky replies: ${stickyOn ? "on" : "off"}${
-            stickyRemoteChat
-              ? ` -> ${stickyRemoteChat.transport}:${stickyRemoteChat.chatId}`
-              : " (no messenger chat seen yet this session)"
+            stickyChat
+              ? ` -> ${stickyChat.transport}:${stickyChat.chatId}`
+              : " (no messenger chat seen yet)"
           }`
         );
         lines.push("━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -601,9 +651,10 @@ export default function (pi: ExtensionAPI): void {
 
         saveConfig(cfg5);
         const stickyState = cfg5.stickyReplies === false ? "off" : "on";
-        const where = stickyRemoteChat
-          ? ` -> ${stickyRemoteChat.transport}:${stickyRemoteChat.chatId}`
-          : " (no messenger chat seen yet this session)";
+        const stickyChat = runtime.stickyRemoteChat;
+        const where = stickyChat
+          ? ` -> ${stickyChat.transport}:${stickyChat.chatId}`
+          : " (no messenger chat seen yet)";
         context.ui.notify(
           `📌 Sticky replies ${stickyState}${cfg5.stickyReplies === false ? "" : where}`,
           "info"

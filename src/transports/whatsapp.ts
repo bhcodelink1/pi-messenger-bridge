@@ -1,6 +1,5 @@
 import * as fs from "fs";
 import * as path from "path";
-import * as qrcode from "qrcode-terminal";
 import type { ChallengeAuth } from "../auth/challenge-auth.js";
 import type { ExternalMessage } from "../types.js";
 import type { ITransportProvider } from "./interface.js";
@@ -90,6 +89,9 @@ export class WhatsAppProvider implements ITransportProvider {
 
       if (qr && this.isManualConnect) {
         console.log("\n📱 Scan this QR code with WhatsApp to authenticate:\n");
+        // Loaded on first QR prompt so the package stays off the extension
+        // startup path for everyone who is not pairing WhatsApp right now.
+        const qrcode = await import("qrcode-terminal");
         qrcode.generate(qr, { small: true });
         console.log("\n");
       }

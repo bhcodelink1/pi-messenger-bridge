@@ -9,12 +9,14 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
+import { resetRuntime } from '../src/runtime';
 
 type Send = { chatId: string; transport: string; text: string };
 
 const sent: Send[] = [];
 const userMessages: string[] = [];
 let inboundHandler: ((msg: any) => void) | null = null;
+let disconnectAllCalls = 0;
 let config: Record<string, unknown> = {};
 
 vi.mock('../src/config', async (importOriginal) => {
@@ -43,7 +45,9 @@ vi.mock('../src/transports/manager', () => ({
       return [];
     }
     async connectAll(): Promise<void> {}
-    async disconnectAll(): Promise<void> {}
+    async disconnectAll(): Promise<void> {
+      disconnectAllCalls++;
+    }
     onMessage(cb: (msg: any) => void): void {
       inboundHandler = cb;
     }
@@ -110,6 +114,9 @@ async function loadExtension() {
 
   return {
     turnStart: (message: unknown) => handlers.get('turn_end')?.({ message }, context),
+    shutdown: (reason: string) =>
+      handlers.get('session_shutdown')?.({ reason }, context),
+    start: (reason = 'new') => handlers.get('session_start')?.({ reason }, context),
     ui,
   };
 }
@@ -138,7 +145,11 @@ beforeEach(async () => {
   sent.length = 0;
   userMessages.length = 0;
   inboundHandler = null;
+  disconnectAllCalls = 0;
   config = { telegram: { token: 'test' }, hideToolCalls: true };
+  // Transports and the sticky target live on globalThis for the lifetime of
+  // the process, so each case has to clear them to start from a cold boot.
+  resetRuntime();
   vi.resetModules();
 });
 
@@ -225,5 +236,85 @@ describe('turn_end delivery through the extension', () => {
     await turnStart(assistant([textBlock('late report')]));
 
     expect(sent.map((s) => s.transport)).toEqual(['telegram', 'matrix', 'matrix']);
+  });
+});
+
+/**
+ * Pi re-runs the extension factory on every session replacement (/new, /clear,
+ * /resume, fork, /reload) and awaits `session_shutdown` handlers before it
+ * builds the next session. Disconnecting there froze the terminal for 5-10s per
+ * session change and made Telegram answer the fresh long-poll with a 409.
+ */
+describe('session replacement', () => {
+  it('keeps messenger connections open when pi replaces the session', async () => {
+    const { shutdown } = await loadExtension();
+
+    await shutdown('new');
+    await shutdown('resume');
+    await shutdown('fork');
+    await shutdown('reload');
+
+    expect(disconnectAllCalls).toBe(0);
+  });
+
+  it('disconnects transports when pi quits', async () => {
+    const { shutdown } = await loadExtension();
+
+    await shutdown('quit');
+
+    expect(disconnectAllCalls).toBe(1);
+  });
+
+  it('rebuilds transports once, not once per session', async () => {
+    await loadExtension();
+    expect(inboundHandler).not.toBeNull();
+
+    // The mock records whatever handler onMessage last received. Clearing it and
+    // starting a second session proves the second session does not register a
+    // second set of transports for the same process.
+    inboundHandler = null;
+    const second = await loadExtension();
+    await second.start('new');
+
+    expect(inboundHandler).toBeNull();
+  });
+
+  it('routes inbound messages to the session that is alive now', async () => {
+    await loadExtension();
+    userMessages.length = 0;
+
+    const second = await loadExtension();
+    await second.start('new');
+
+    inbound('still reachable after /new');
+
+    expect(userMessages).toHaveLength(1);
+    expect(userMessages[0]).toContain('via telegram');
+  });
+
+  it('drops inbound messages while no session owns the bridge', async () => {
+    const { shutdown } = await loadExtension();
+    await shutdown('new');
+
+    inbound('arrives in the gap between sessions');
+
+    expect(userMessages).toHaveLength(0);
+  });
+
+  it('keeps the sticky reply target across a session replacement', async () => {
+    const first = await loadExtension();
+
+    inbound('start a background job');
+    await first.turnStart(assistant([textBlock('started it')]));
+    expect(sent).toHaveLength(1);
+
+    await first.shutdown('new');
+    const second = await loadExtension();
+    await second.start('new');
+
+    await second.turnStart(assistant([textBlock('the job finished')]));
+
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toMatchObject({ chatId: '8341035574', transport: 'telegram' });
   });
 });

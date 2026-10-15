@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Session creation and session switching stalled for 5-10 seconds. Pi awaits every `session_shutdown` handler before it builds the next session, and the bridge's handler awaited `transportManager.disconnectAll()`. Telegram's `stopPolling()` with no options waits for the in-flight `getUpdates` long-poll to come back from the server, which is `polling.params.timeout` (10 seconds by default), so `/new`, `/clear`, `/resume`, fork, clone, `/reload` and quit each froze the terminal until Telegram answered. Measured against the real bot: 9242ms before, 0ms after. `disconnect()` now passes `{ cancel: true }`, `TransportManager.disconnectAll()` takes a 1 second deadline so no transport can block Pi at all, and Matrix's `client.stop()` is bounded the same way
+
+### Changed
+- Messenger connections now survive session replacement. Pi re-runs the extension factory on every `/new`, `/resume`, fork and `/reload`, which used to tear every transport down and dial it back up; Telegram answered the fresh long-poll with `409 terminated by other getUpdates request` while the previous socket was still registered server-side, and the bridge was unreachable for the length of the redial. Transports, auth state and the sticky reply target moved to a process-wide holder in `src/runtime.ts` (the single-instance lock in `lock.ts` already assumed one live connection per machine), `session_shutdown` only disconnects on `reason: "quit"`, and each `session_start` rebinds the inbound sink to the live session's `sendUserMessage`. Inbound messages that arrive in the gap between sessions are logged and dropped instead of being written to a dead session. A session start also re-dials transports that are still idle, so a process that lost the lock at startup recovers once the other pi quits
+- Extension startup no longer evaluates the messenger SDKs. `node-telegram-bot-api` (which pulls in `request`, hence the `util._extend is deprecated` warning) and `matrix-bot-sdk` were static imports, so both loaded even when only Telegram was configured. All five transports now load their SDK on `connect()`, and `qrcode-terminal` loads on the first WhatsApp QR prompt. Importing the compiled extension dropped from 207ms to 9ms
+- `connect()` waits at most 2 seconds for the first `getUpdates` instead of the full 10 second long-poll, so `/msg-bridge connect` reports promptly. Polling failures still surface through `polling_error`
+- The transient `409 terminated by other getUpdates request` during a reconnect window is no longer reported as a transport error
+- Sticky reply status lines read `(no messenger chat seen yet)` instead of `(no messenger chat seen yet this session)`, since the sticky target now outlives a session
+
+### Added
+- `src/async-util.ts` with `withDeadline(promise, ms)`, used by the transport teardown paths
+- `tests/manager.test.ts` covering the `disconnectAll` deadline, and six cases in `tests/extension-turn-end.test.ts` covering session replacement: no disconnect on `new`/`resume`/`fork`/`reload`, disconnect on `quit`, transports built once per process, inbound routing follows the live session, the sticky target survives replacement
+
 ## [0.5.0] - 2026-10-15
 
 ### Added

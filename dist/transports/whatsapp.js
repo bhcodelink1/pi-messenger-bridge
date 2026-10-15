@@ -1,6 +1,5 @@
 import * as fs from "fs";
 import * as path from "path";
-import * as qrcode from "qrcode-terminal";
 async function loadBaileys() {
     const baileys = await import("@whiskeysockets/baileys");
     return baileys;
@@ -71,6 +70,9 @@ export class WhatsAppProvider {
             }
             if (qr && this.isManualConnect) {
                 console.log("\n📱 Scan this QR code with WhatsApp to authenticate:\n");
+                // Loaded on first QR prompt so the package stays off the extension
+                // startup path for everyone who is not pairing WhatsApp right now.
+                const qrcode = await import("qrcode-terminal");
                 qrcode.generate(qr, { small: true });
                 console.log("\n");
             }

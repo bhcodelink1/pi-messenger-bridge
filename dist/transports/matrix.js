@@ -1,7 +1,9 @@
-import { AutojoinRoomsMixin, LogService, MatrixClient, RichConsoleLogger, RustSdkCryptoStorageProvider, SimpleFsStorageProvider, } from "matrix-bot-sdk";
 import * as os from "os";
 import * as path from "path";
+import { withDeadline } from "../async-util.js";
 import { extractUsername, formatForMatrix, shouldSkipEvent, stripBotMention, wasBotMentioned, } from "./matrix-utils.js";
+/** Bound on how long Matrix teardown may take before we move on without it. */
+const DISCONNECT_TIMEOUT_MS = 500;
 /**
  * Matrix transport provider using matrix-bot-sdk
  * Works with any Matrix homeserver — Element X, Element Web, FluffyChat, etc.
@@ -33,6 +35,9 @@ export class MatrixProvider {
         if (!homeserverUrl || !accessToken) {
             throw new Error("Matrix homeserver URL and access token required");
         }
+        // matrix-bot-sdk plus its Rust crypto native binding cost about 100ms of
+        // module evaluation, so the SDK loads only when a Matrix transport connects.
+        const { AutojoinRoomsMixin, LogService, MatrixClient: MatrixClientCtor, RichConsoleLogger, RustSdkCryptoStorageProvider: RustSdkCryptoStorageProviderCtor, RustSdkCryptoStoreType, SimpleFsStorageProvider, } = await import("matrix-bot-sdk");
         const storagePath = path.join(os.homedir(), ".pi", "msg-bridge-matrix-store.json");
         const storage = new SimpleFsStorageProvider(storagePath);
         // Set up E2EE crypto storage if encryption is enabled.
@@ -43,14 +48,14 @@ export class MatrixProvider {
         if (this.config.encryption !== false) {
             try {
                 const cryptoStorePath = path.join(os.homedir(), ".pi", "msg-bridge-matrix-crypto");
-                cryptoProvider = new RustSdkCryptoStorageProvider(cryptoStorePath, 0 /* RustSdkCryptoStoreType.Sqlite */);
+                cryptoProvider = new RustSdkCryptoStorageProviderCtor(cryptoStorePath, 0 /* RustSdkCryptoStoreType.Sqlite */);
                 console.log("[Matrix] E2EE crypto storage enabled (Rust/SQLite)");
             }
             catch (err) {
                 console.warn("[Matrix] E2EE crypto not available, continuing without encryption:", err.message);
             }
         }
-        this.client = new MatrixClient(homeserverUrl, accessToken, storage, cryptoProvider);
+        this.client = new MatrixClientCtor(homeserverUrl, accessToken, storage, cryptoProvider);
         // Auto-join rooms the bot is invited to
         AutojoinRoomsMixin.setupOnClient(this.client);
         // Cache bot user ID (never changes)
@@ -134,13 +139,17 @@ export class MatrixProvider {
     async disconnect() {
         if (!this._isConnected || !this.client)
             return;
-        this.client.stop();
-        this._isConnected = false;
+        const client = this.client;
         this.client = undefined;
+        this._isConnected = false;
         this.botUserId = undefined;
         this.joinedRooms.clear();
         this.roomMemberCount.clear();
         this.connectedAt = 0;
+        // The SDK types declare stop() as void even though it starts an async
+        // shutdown of the sync loop, so normalise before bounding the wait.
+        const stopping = client.stop();
+        await withDeadline(Promise.resolve(stopping).catch(() => undefined), DISCONNECT_TIMEOUT_MS);
         console.log("[Matrix] Disconnected");
     }
     async sendMessage(chatId, text) {

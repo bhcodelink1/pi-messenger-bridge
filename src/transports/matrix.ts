@@ -1,15 +1,11 @@
-import type { ILogger } from "matrix-bot-sdk";
-import {
-  AutojoinRoomsMixin,
-  LogService,
+import type {
+  ILogger,
   MatrixClient,
-  RichConsoleLogger,
   RustSdkCryptoStorageProvider,
-  RustSdkCryptoStoreType,
-  SimpleFsStorageProvider,
 } from "matrix-bot-sdk";
 import * as os from "os";
 import * as path from "path";
+import { withDeadline } from "../async-util.js";
 import type { ChallengeAuth } from "../auth/challenge-auth.js";
 import type { ExternalMessage } from "../types.js";
 import type { ITransportProvider } from "./interface.js";
@@ -20,6 +16,9 @@ import {
   stripBotMention,
   wasBotMentioned,
 } from "./matrix-utils.js";
+
+/** Bound on how long Matrix teardown may take before we move on without it. */
+const DISCONNECT_TIMEOUT_MS = 500;
 
 /**
  * Matrix transport provider using matrix-bot-sdk
@@ -56,6 +55,18 @@ export class MatrixProvider implements ITransportProvider {
       throw new Error("Matrix homeserver URL and access token required");
     }
 
+    // matrix-bot-sdk plus its Rust crypto native binding cost about 100ms of
+    // module evaluation, so the SDK loads only when a Matrix transport connects.
+    const {
+      AutojoinRoomsMixin,
+      LogService,
+      MatrixClient: MatrixClientCtor,
+      RichConsoleLogger,
+      RustSdkCryptoStorageProvider: RustSdkCryptoStorageProviderCtor,
+      RustSdkCryptoStoreType,
+      SimpleFsStorageProvider,
+    } = await import("matrix-bot-sdk");
+
     const storagePath = path.join(
       os.homedir(),
       ".pi",
@@ -75,14 +86,14 @@ export class MatrixProvider implements ITransportProvider {
           ".pi",
           "msg-bridge-matrix-crypto"
         );
-        cryptoProvider = new RustSdkCryptoStorageProvider(cryptoStorePath, RustSdkCryptoStoreType.Sqlite);
+        cryptoProvider = new RustSdkCryptoStorageProviderCtor(cryptoStorePath, RustSdkCryptoStoreType.Sqlite);
         console.log("[Matrix] E2EE crypto storage enabled (Rust/SQLite)");
       } catch (err) {
         console.warn("[Matrix] E2EE crypto not available, continuing without encryption:", (err as Error).message);
       }
     }
 
-    this.client = new MatrixClient(
+    this.client = new MatrixClientCtor(
       homeserverUrl,
       accessToken,
       storage,
@@ -175,13 +186,21 @@ export class MatrixProvider implements ITransportProvider {
   async disconnect(): Promise<void> {
     if (!this._isConnected || !this.client) return;
 
-    this.client.stop();
-    this._isConnected = false;
+    const client = this.client;
     this.client = undefined;
+    this._isConnected = false;
     this.botUserId = undefined;
     this.joinedRooms.clear();
     this.roomMemberCount.clear();
     this.connectedAt = 0;
+
+    // The SDK types declare stop() as void even though it starts an async
+    // shutdown of the sync loop, so normalise before bounding the wait.
+    const stopping = client.stop() as Promise<void> | void;
+    await withDeadline(
+      Promise.resolve(stopping).catch(() => undefined),
+      DISCONNECT_TIMEOUT_MS
+    );
     console.log("[Matrix] Disconnected");
   }
 

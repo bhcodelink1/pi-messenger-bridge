@@ -1,7 +1,11 @@
-import TelegramBot from "node-telegram-bot-api";
+import type TelegramBot from "node-telegram-bot-api";
+import { withDeadline } from "../async-util.js";
 import type { ChallengeAuth } from "../auth/challenge-auth.js";
 import type { ExternalMessage } from "../types.js";
 import type { ITransportProvider } from "./interface.js";
+
+/** How long to wait for the first getUpdates before treating connect as done. */
+const FIRST_POLL_TIMEOUT_MS = 2000;
 
 /**
  * Telegram transport provider using node-telegram-bot-api
@@ -51,10 +55,32 @@ export class TelegramProvider implements ITransportProvider {
     return text.replace(/\x00(\d+)\x00/g, (_, i) => lifted[parseInt(i, 10)]);
   }
 
+  /**
+   * node-telegram-bot-api pulls in `request` and friends, which cost about
+   * 100ms of module evaluation. Loading it here keeps that off the extension
+   * startup path whenever Telegram is not the configured transport.
+   */
+  private async loadTelegramBot(): Promise<typeof TelegramBot> {
+    const mod = await import("node-telegram-bot-api");
+    return (mod as { default: typeof TelegramBot }).default;
+  }
+
+  /**
+   * A 409 from getUpdates means Telegram still has the previous long-poll
+   * registered for this bot. That happens in the window right after a
+   * reconnect. node-telegram-bot-api retries on its own, so it is not an error
+   * worth surfacing.
+   */
+  private static isPollOwnershipConflict(err: unknown): boolean {
+    const message = err instanceof Error ? err.message : String(err);
+    return message.toLowerCase().includes("terminated by other getupdates");
+  }
+
   async connect(): Promise<void> {
     if (this._isConnected) return;
 
-    this.bot = new TelegramBot(this.token, {
+    const TelegramBotCtor = await this.loadTelegramBot();
+    this.bot = new TelegramBotCtor(this.token, {
       polling: {
         interval: 300,
         autoStart: false,
@@ -74,19 +100,31 @@ export class TelegramProvider implements ITransportProvider {
 
     // Handle polling errors
     this.bot.on("polling_error", (err) => {
+      if (TelegramProvider.isPollOwnershipConflict(err)) return;
       if (this.errorHandler) {
         this.errorHandler(err);
       }
     });
 
-    await this.bot.startPolling();
+    // startPolling() resolves when the *first* getUpdates comes back. With the
+    // default 10s long-poll that is 10 seconds of dead time before the caller
+    // learns the bot is up, so cap the wait and let the poll continue in the
+    // background. Polling failures arrive through polling_error either way.
+    const firstPoll = this.bot.startPolling().catch(() => undefined);
+    await withDeadline(firstPoll, FIRST_POLL_TIMEOUT_MS);
     this._isConnected = true;
   }
 
   async disconnect(): Promise<void> {
     if (!this._isConnected || !this.bot) return;
 
-    await this.bot.stopPolling();
+    // `stopPolling()` with no options waits for the in-flight getUpdates
+    // long-poll to return from Telegram, up to `polling.params.timeout`
+    // (10 seconds by default). Pi awaits `session_shutdown` handlers before it
+    // builds the next session, so that wait froze the UI for 5-10s on every
+    // /new, /resume, fork, /reload and quit. `cancel: true` aborts the pending
+    // request instead and returns in about a millisecond.
+    await this.bot.stopPolling({ cancel: true });
     this._isConnected = false;
     this.bot = undefined;
   }
