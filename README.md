@@ -18,6 +18,7 @@ https://github.com/user-attachments/assets/cd64360e-e8cd-4820-a67f-bd127c5d6035
 - 💾 Persistent config (auth state, auto-connect, widget preference)
 - 🔧 Tool call visibility for remote users
 - ⌨️ Typing indicator that keeps refreshing while tools run
+- 📌 Sticky replies — work that finishes after its answer was already sent still reaches your phone
 - 📝 Multi-turn conversation support
 - 🔑 Secure permissions (chmod 600 for config files, 700 for directories)
 
@@ -139,6 +140,8 @@ The user enters the code in the bot chat to become a trusted user.
 | `/msg-bridge toggletools` | Toggle tool call visibility in remote messages |
 | `/msg-bridge typing` | Toggle the typing indicator on/off |
 | `/msg-bridge typing <seconds>` | Set the typing refresh interval (1-20, `0` turns it off) |
+| `/msg-bridge sticky` | Toggle sticky replies on/off |
+| `/msg-bridge sticky <on\|off>` | Set whether late turns deliver to the last messenger chat |
 | `/msg-bridge help` | Show command reference |
 
 ### Admin commands (in DM with the bot)
@@ -156,6 +159,8 @@ Trusted users can DM the bot directly to manage state. Reply with `/help` for th
 | `/toggletools` | Toggle tool call visibility in replies |
 | `/typing` | Toggle the typing indicator |
 | `/typing <seconds>` | Set the typing refresh interval (1-20, `0` turns it off) |
+| `/sticky` | Toggle sticky replies |
+| `/sticky <on\|off>` | Set sticky replies explicitly |
 
 ## Configuration
 
@@ -177,6 +182,7 @@ Example config:
   "showWidget": true,
   "typingIndicator": true,
   "typingRefreshMs": 4000,
+  "stickyReplies": true,
   "debug": false
 }
 ```
@@ -201,6 +207,36 @@ The bridge keeps the indicator alive instead:
 Set `"typingIndicator": false` to send one indicator per turn like older
 versions, or `"typingRefreshMs": 0` to keep the tool-call pings without a timer.
 Slack has no typing indicator for bots, so nothing is sent there.
+
+### Sticky replies
+
+A messenger request is only in flight while the turn that answers it runs. If pi
+answers early and finishes the work later, the later turn has no request to
+reply to, and the result stays in the terminal session.
+
+The common case is a background subagent. You ask from Telegram, pi spawns the
+subagent and replies "working on it", and that reply closes the request. Eleven
+minutes later the subagent report arrives as its own turn, and with nothing
+holding the chat ID, nothing is delivered.
+
+Sticky replies fix that. The bridge remembers the last chat a message arrived
+from and never clears it, so any later turn with an answer goes back to that
+chat. It is on by default.
+
+Two details keep it quiet:
+
+- Sticky deliveries carry the assistant text only. Tool call summaries
+  (`🔧 \`bash\` (...)`) go to the chat that asked, never to a sticky target, so
+  working in your terminal does not spam your phone with tool lines.
+- Turns with no text send nothing.
+
+Set `"stickyReplies": false` (or run `/msg-bridge sticky off`, or DM the bot
+`/sticky off`) to go back to answering only the request in flight.
+
+One trade-off to know about: the bridge cannot tell a turn you started in your
+terminal apart from one pi started on its own. With sticky replies on, a long
+answer you ask for at the keyboard is also pushed to the last messenger chat.
+Turn the option off if you would rather watch those in the terminal.
 
 ## Environment Variables
 

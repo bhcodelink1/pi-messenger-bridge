@@ -7,9 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-15
+
 ### Added
+- Sticky replies — the bridge remembers the last messenger chat a message arrived from and delivers turns that finish after their request was already answered. This is the fix for background subagent reports: pi answers "the subagent is running" from Telegram, which closed the in-flight request, and the report arriving minutes later was written to the pi session and never sent. On by default. Toggle with `stickyReplies` in config, `/msg-bridge sticky [on|off]` in pi, or `/sticky [on|off]` in a DM with the bot. Sticky deliveries carry assistant text only, so tool call summaries never leak into your terminal-driven work. Routing rules live in `src/reply-routing.ts` with unit tests, and `tests/extension-turn-end.test.ts` drives the real `turn_end` handler through the three-turn sequence that used to fail
 - Typing indicator heartbeat — the indicator now survives long tool runs. `turn_start` starts it, `tool_execution_start` re-pings and resets the timer, and a refresh timer re-sends every `typingRefreshMs` (default 4000 ms, clamped to 1000-20000) until the answer is delivered. Previously one indicator was sent per turn, which Telegram, WhatsApp, and Discord cleared after 3-10 seconds while a build or fetch was still running
 - `typingIndicator` and `typingRefreshMs` config keys, `/msg-bridge typing [seconds]` pi command, matching `/typing [seconds]` DM admin command, and a Typing entry in the `/msg-bridge` interactive menu
+- Sticky replies entry in the `/msg-bridge` interactive menu, and a `Sticky replies: on -> telegram:<chatId>` line in `/msg-bridge status`
+
+### Fixed
+- `npm test` picked up the compiled copies of the test files in `dist/` (committed so pi can install from git) and failed on missing dev dependencies. `vitest.config.mjs` now runs `src/` and `tests/` only
 
 ## [0.4.0] - 2026-05-09
 

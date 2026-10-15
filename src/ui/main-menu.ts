@@ -58,7 +58,8 @@ function showHelp(mctx: MenuContext): void {
     "  /msg-bridge configure <platform>  — set up a transport\n" +
     "  /msg-bridge widget                — toggle status widget\n" +
     "  /msg-bridge toggletools           — toggle tool call visibility\n" +
-    "  /msg-bridge typing [seconds]      — typing indicator on/off or refresh interval",
+    "  /msg-bridge typing [seconds]      — typing indicator on/off or refresh interval\n" +
+    "  /msg-bridge sticky [on|off]       — deliver late turns to the last messenger chat",
     "info",
   );
 }
@@ -266,6 +267,26 @@ async function doTyping(mctx: MenuContext): Promise<void> {
   mctx.ui.notify(`⌨️ Typing indicator ${describeTyping(cfg)}`, "info");
 }
 
+function describeSticky(cfg: ReturnType<typeof loadConfig>): string {
+  return cfg.stickyReplies === false ? "off" : "on";
+}
+
+async function doSticky(mctx: MenuContext): Promise<void> {
+  const current = loadConfig();
+  const enabled = current.stickyReplies !== false;
+
+  const choice = await mctx.ui.select(
+    `Sticky replies — ${describeSticky(current)}\nLate turns (subagent reports, retries) go to the chat that last wrote to the bot`,
+    [enabled ? "Turn off" : "Turn on"],
+  );
+  if (!choice) return;
+
+  const cfg = loadConfig();
+  cfg.stickyReplies = cfg.stickyReplies === false;
+  saveConfig(cfg);
+  mctx.ui.notify(`📌 Sticky replies ${describeSticky(cfg)}`, "info");
+}
+
 // ── Main menu ───────────────────────────────────────────────────────────────
 
 export async function openMainMenu(mctx: MenuContext): Promise<void> {
@@ -280,6 +301,7 @@ export async function openMainMenu(mctx: MenuContext): Promise<void> {
       "Configure",
       "Widget",
       "Typing",
+      "Sticky replies",
       "Help",
     ];
 
@@ -301,6 +323,9 @@ export async function openMainMenu(mctx: MenuContext): Promise<void> {
         break;
       case "Typing":
         await doTyping(mctx);
+        break;
+      case "Sticky replies":
+        await doSticky(mctx);
         break;
       case "Help":
         showHelp(mctx);

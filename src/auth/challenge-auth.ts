@@ -305,6 +305,27 @@ export class ChallengeAuth {
         return true;
       }
 
+      case "/sticky": {
+        const cfg = loadConfig();
+        const arg = parts[1];
+        if (arg === undefined) {
+          cfg.stickyReplies = cfg.stickyReplies === false;
+        } else if (arg === "on" || arg === "true") {
+          cfg.stickyReplies = true;
+        } else if (arg === "off" || arg === "false") {
+          cfg.stickyReplies = false;
+        } else {
+          await sendMessage("Usage: /sticky [on|off]");
+          return true;
+        }
+        saveConfig(cfg);
+        const stickyState = cfg.stickyReplies === false ? "off" : "on";
+        await sendMessage(
+          `📌 Sticky replies ${stickyState}. When on, turns that finish after their answer was already sent (subagent reports, retries) are still delivered to the chat that last wrote to the bot.`
+        );
+        return true;
+      }
+
       case "/revoke": {
         if (parts.length < 2) {
           await sendMessage("Usage: /revoke <userId> or /revoke <transport:userId>");
@@ -412,6 +433,8 @@ export class ChallengeAuth {
 • \`/toggletools\` — Toggle tool call visibility in replies
 • \`/typing\` — Toggle the typing indicator
 • \`/typing <seconds>\` — Set its refresh interval (1-20, 0 = off)
+• \`/sticky\` — Toggle sticky replies (deliver late turns to this chat)
+• \`/sticky on|off\` — Set sticky replies explicitly
 
 *Authentication:*
 • First DM to bot → 6-digit code shown in terminal

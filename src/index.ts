@@ -5,8 +5,9 @@ import * as os from "os";
 import * as path from "path";
 import { ChallengeAuth } from "./auth/challenge-auth.js";
 import { loadConfig, saveConfig } from "./config.js";
-import { extractTextFromMessage, formatToolCalls, hasToolCalls, splitMessage } from "./formatting.js";
+import { splitMessage } from "./formatting.js";
 import { acquireLock, releaseLock } from "./lock.js";
+import { planTurnReply } from "./reply-routing.js";
 import { DiscordProvider } from "./transports/discord.js";
 import { TransportManager } from "./transports/manager.js";
 import { MatrixProvider } from "./transports/matrix.js";
@@ -25,6 +26,13 @@ import { createStatusWidget } from "./ui/status-widget.js";
 export default function (pi: ExtensionAPI): void {
   const transportManager = new TransportManager();
   let pendingRemoteChat: PendingRemoteChat | null = null;
+  /**
+   * The last chat a message arrived from. `pendingRemoteChat` is cleared as soon
+   * as a turn finishes answering it, which drops any later turn that produces
+   * the real result. This one is never cleared, so those turns still have a
+   * destination. See `planTurnReply`.
+   */
+  let stickyRemoteChat: PendingRemoteChat | null = null;
   let auth: ChallengeAuth;
   let ctx: ExtensionContext;
 
@@ -199,6 +207,7 @@ export default function (pi: ExtensionAPI): void {
         username: msg.username,
         messageId: msg.messageId,
       };
+      stickyRemoteChat = pendingRemoteChat;
 
       const taggedMessage = `[📱 @${msg.username} via ${msg.transport}]: ${msg.content}`;
       pi.sendUserMessage(taggedMessage, { deliverAs: "followUp" });
@@ -236,48 +245,37 @@ export default function (pi: ExtensionAPI): void {
 
   /**
    * Handle turn end - send response back to messenger
+   *
+   * Two targets are possible: the request currently in flight, and the sticky
+   * last-seen chat for turns that arrive after that request was answered. See
+   * `planTurnReply` in reply-routing.ts for the rules.
    */
   pi.on("turn_end", async (event, _context) => {
-    if (!pendingRemoteChat) return;
+    const config = loadConfig();
+    const plan = planTurnReply({
+      message: event.message as AssistantMessage,
+      pendingRemoteChat,
+      stickyRemoteChat,
+      config,
+    });
+
+    if (!plan.target || plan.text === "") return;
+    const target = plan.target;
 
     try {
-      const message = event.message as AssistantMessage;
-      const responseText = extractTextFromMessage(message);
-      const toolCallsText = formatToolCalls(message);
-      const hasPendingTools = hasToolCalls(message);
-      const config = loadConfig();
-
-      const parts: string[] = [];
-      const trimmedResponse = responseText.trim();
-      if (trimmedResponse) parts.push(trimmedResponse);
-      if (toolCallsText && !config.hideToolCalls) parts.push(toolCallsText);
-
-      if (parts.length === 0) {
-        // Nothing to send this turn — don't touch pendingRemoteChat;
-        // a future turn_end may have the actual response text.
-        return;
-      }
-
-      const fullText = parts.join("\n\n");
-
       // Split long messages for Telegram's 4096 char limit
-      const chunks = splitMessage(fullText, 4000);
+      const chunks = splitMessage(plan.text, 4000);
       for (const chunk of chunks) {
-        await transportManager.sendMessage(
-          pendingRemoteChat.chatId,
-          pendingRemoteChat.transport,
-          chunk
-        );
+        await transportManager.sendMessage(target.chatId, target.transport, chunk);
       }
 
-      if (!hasPendingTools) {
+      if (plan.clearPending) {
         pendingRemoteChat = null;
         typingHeartbeat.stop();
       }
     } catch (err) {
-      const transport = pendingRemoteChat?.transport ?? "unknown";
       ctx.ui.notify(
-        `Failed to send response to ${transport}: ${(err as Error).message}`,
+        `Failed to send response to ${target.transport}: ${(err as Error).message}`,
         "error"
       );
       pendingRemoteChat = null;
@@ -308,7 +306,7 @@ export default function (pi: ExtensionAPI): void {
    */
   pi.registerCommand("msg-bridge", {
     description:
-      "Manage remote messenger connections (help|status|connect|disconnect|configure|widget|typing)",
+      "Manage remote messenger connections (help|status|connect|disconnect|configure|widget|typing|sticky)",
     handler: async (args: string, context) => {
       const parts = args.trim().split(/\s+/).filter(p => p.length > 0);
       const subcommand = parts[0] || "";
@@ -344,6 +342,8 @@ export default function (pi: ExtensionAPI): void {
           "/msg-bridge toggletools       Toggle tool call visibility",
           "/msg-bridge typing            Toggle typing indicator on/off",
           "/msg-bridge typing <seconds>  Typing refresh interval (1-20, 0 = off)",
+          "/msg-bridge sticky            Toggle sticky replies on/off",
+          "/msg-bridge sticky on|off     Deliver late turns to the last messenger chat",
           "",
           "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         ];
@@ -561,6 +561,14 @@ export default function (pi: ExtensionAPI): void {
 
         lines.push("");
         lines.push(`Channels: ${stats.channels}`);
+        const stickyOn = loadConfig().stickyReplies !== false;
+        lines.push(
+          `Sticky replies: ${stickyOn ? "on" : "off"}${
+            stickyRemoteChat
+              ? ` -> ${stickyRemoteChat.transport}:${stickyRemoteChat.chatId}`
+              : " (no messenger chat seen yet this session)"
+          }`
+        );
         lines.push("━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
         context.ui.notify(lines.join("\n"), "info");
@@ -573,6 +581,33 @@ export default function (pi: ExtensionAPI): void {
         saveConfig(cfg3);
         const toolState = cfg3.hideToolCalls ? "hidden" : "shown";
         context.ui.notify(`🔧 Tool calls ${toolState} in remote messages`, "info");
+        break;
+      }
+
+      case "sticky": {
+        const cfg5 = loadConfig();
+        const arg = parts[1];
+
+        if (arg === undefined) {
+          cfg5.stickyReplies = cfg5.stickyReplies === false;
+        } else if (arg === "on" || arg === "true") {
+          cfg5.stickyReplies = true;
+        } else if (arg === "off" || arg === "false") {
+          cfg5.stickyReplies = false;
+        } else {
+          context.ui.notify("Usage: /msg-bridge sticky [on|off]", "error");
+          return;
+        }
+
+        saveConfig(cfg5);
+        const stickyState = cfg5.stickyReplies === false ? "off" : "on";
+        const where = stickyRemoteChat
+          ? ` -> ${stickyRemoteChat.transport}:${stickyRemoteChat.chatId}`
+          : " (no messenger chat seen yet this session)";
+        context.ui.notify(
+          `📌 Sticky replies ${stickyState}${cfg5.stickyReplies === false ? "" : where}`,
+          "info"
+        );
         break;
       }
 

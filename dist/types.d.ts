@@ -52,6 +52,19 @@ export interface MsgBridgeConfig {
         }>;
     };
     hideToolCalls?: boolean;
+    /**
+     * Keep replying to the messenger chat a message last arrived from, even for
+     * turns that turn did not trigger. Defaults to true; set it to false to only
+     * answer the request currently in flight.
+     *
+     * This exists because pi can finish work after the turn that answered the
+     * request. A background subagent report (OptChat), a scheduled job, or a
+     * retried turn all run as their own turns, and without a sticky target their
+     * answer exists only in the terminal session.
+     *
+     * Sticky replies send the assistant text only, never tool call summaries.
+     */
+    stickyReplies?: boolean;
     /** Show a typing indicator while pi works on a remote request (default true). */
     typingIndicator?: boolean;
     /**
