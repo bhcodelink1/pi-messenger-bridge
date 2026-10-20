@@ -23,12 +23,14 @@ function plan(options: {
   pendingRemoteChat?: PendingRemoteChat | null;
   stickyRemoteChat?: PendingRemoteChat | null;
   config?: MsgBridgeConfig;
+  interimSent?: boolean;
 }) {
   return planTurnReply({
     message: message(options.content ?? []),
     pendingRemoteChat: options.pendingRemoteChat ?? null,
     stickyRemoteChat: options.stickyRemoteChat ?? null,
     config: options.config ?? {},
+    interimSent: options.interimSent,
   });
 }
 
@@ -157,5 +159,126 @@ describe('planTurnReply target precedence', () => {
 
     expect(result.target).toBe(requester);
     expect(result.sticky).toBe(false);
+  });
+});
+
+describe('planTurnReply interimMessages', () => {
+  it('defaults to sending prose on every turn, including tool-calling ones', () => {
+    const result = plan({
+      content: [textBlock('still digging'), toolBlock()],
+      pendingRemoteChat: requester,
+      interimSent: true,
+    });
+
+    expect(result.text).toContain('still digging');
+    expect(result.interim).toBe(true);
+  });
+
+  it('"first" lets the acknowledgement on a tool-calling turn through', () => {
+    const result = plan({
+      content: [textBlock('Checking the review scores for you.'), toolBlock('spawn')],
+      pendingRemoteChat: requester,
+      config: { interimMessages: 'first', hideToolCalls: true },
+      interimSent: false,
+    });
+
+    expect(result.text).toBe('Checking the review scores for you.');
+    expect(result.interim).toBe(true);
+    expect(result.clearPending).toBe(false);
+  });
+
+  it('"first" silences the narration on every later tool-calling turn', () => {
+    const result = plan({
+      content: [textBlock('Zillow blocked me, trying Movoto next.'), toolBlock('bash')],
+      pendingRemoteChat: requester,
+      config: { interimMessages: 'first' },
+      interimSent: true,
+    });
+
+    expect(result.target).toBeNull();
+    expect(result.text).toBe('');
+  });
+
+  it('"first" still delivers the final answer, which is the turn with no tool calls', () => {
+    const result = plan({
+      content: [textBlock('Dark Matter holds 6.6 on Rotten Tomatoes.')],
+      pendingRemoteChat: requester,
+      config: { interimMessages: 'first' },
+      interimSent: true,
+    });
+
+    expect(result.text).toContain('Rotten Tomatoes');
+    expect(result.clearPending).toBe(true);
+    expect(result.interim).toBe(false);
+  });
+
+  it('"first" silences the tool call summary on a suppressed turn too', () => {
+    const result = plan({
+      content: [toolBlock('bash')],
+      pendingRemoteChat: requester,
+      config: { interimMessages: 'first' },
+      interimSent: true,
+    });
+
+    expect(result.target).toBeNull();
+  });
+
+  it('"off" sends nothing at all until the work finishes', () => {
+    const ack = plan({
+      content: [textBlock('Looking into it.'), toolBlock('spawn')],
+      pendingRemoteChat: requester,
+      config: { interimMessages: 'off' },
+    });
+    const done = plan({
+      content: [textBlock('Here is the answer.')],
+      pendingRemoteChat: requester,
+      config: { interimMessages: 'off' },
+    });
+
+    expect(ack.target).toBeNull();
+    expect(done.text).toContain('Here is the answer.');
+  });
+
+  it('a suppressed turn leaves the in-flight request alone for the answer to land on', () => {
+    const suppressed = plan({
+      content: [textBlock('half a thought'), toolBlock('bash')],
+      pendingRemoteChat: requester,
+      config: { interimMessages: 'first' },
+      interimSent: true,
+    });
+
+    // clearPending false is what keeps the request alive; the caller must not
+    // clear it on a turn that sent nothing, and NO_REPLY carries false.
+    expect(suppressed.clearPending).toBe(false);
+  });
+
+  it('"first" drops a tool-calling sticky turn, which is terminal work narrating at a phone', () => {
+    const result = plan({
+      content: [textBlock('running the second query'), toolBlock('bash')],
+      stickyRemoteChat: requester,
+      config: { interimMessages: 'first' },
+    });
+
+    expect(result.target).toBeNull();
+  });
+
+  it('"first" keeps a late subagent report, which arrives on a turn with no tool calls', () => {
+    const result = plan({
+      content: [textBlock('ES -0.30%, NQ -1.25%.')],
+      stickyRemoteChat: requester,
+      config: { interimMessages: 'first' },
+    });
+
+    expect(result.text).toContain('ES -0.30%');
+    expect(result.sticky).toBe(true);
+  });
+
+  it('"all" keeps sending tool-calling sticky turns, which is the old behaviour', () => {
+    const result = plan({
+      content: [textBlock('running the second query'), toolBlock('bash')],
+      stickyRemoteChat: requester,
+    });
+
+    expect(result.text).toContain('running the second query');
   });
 });

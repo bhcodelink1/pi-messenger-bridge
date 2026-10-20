@@ -65,6 +65,22 @@ export interface MsgBridgeConfig {
      * Sticky replies send the assistant text only, never tool call summaries.
      */
     stickyReplies?: boolean;
+    /**
+     * How much to send between a remote question and its answer. Defaults to
+     * `"all"`, which forwards the assistant text of every turn, including turns
+     * that only decided on a next tool call.
+     *
+     * `"first"` sends the first such message for a request and nothing after it,
+     * so a short "looking into it" line still arrives while a 30-tool-call
+     * research run stops sending eight half-thoughts to a phone.
+     *
+     * `"off"` sends nothing until the turn that finishes the work.
+     *
+     * A turn that ends without calling a tool is a final answer and always
+     * sends, whatever this is set to. Tool call summaries follow the same rule,
+     * since they only appear on tool-calling turns anyway.
+     */
+    interimMessages?: "all" | "first" | "off";
     /** Show a typing indicator while pi works on a remote request (default true). */
     typingIndicator?: boolean;
     /**

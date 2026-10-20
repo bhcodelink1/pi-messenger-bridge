@@ -183,6 +183,7 @@ Example config:
   "typingIndicator": true,
   "typingRefreshMs": 4000,
   "stickyReplies": true,
+  "interimMessages": "all",
   "debug": false
 }
 ```
@@ -237,6 +238,42 @@ One trade-off to know about: the bridge cannot tell a turn you started in your
 terminal apart from one pi started on its own. With sticky replies on, a long
 answer you ask for at the keyboard is also pushed to the last messenger chat.
 Turn the option off if you would rather watch those in the terminal.
+
+### Interim messages
+
+A turn that ends in a tool call is not an answer. It is pi deciding on its next
+step, and by default the bridge forwards whatever prose came with it. On a
+research run that reaches for a dozen pages, each of those turns is a phone
+notification carrying a half-thought, and you read eight of them before the
+answer.
+
+`interimMessages` sets how much of that goes out.
+
+| Value | Behaviour |
+| --- | --- |
+| `"all"` | Default. Every turn's text is sent, tool-calling turns included. |
+| `"first"` | One interim message per request, then silence until the answer. |
+| `"off"` | Nothing until a turn finishes without calling a tool. |
+
+`"first"` exists so a short acknowledgement still reaches you. The line pi
+sends before delegating work, `Checking the Barrington listings for you.`,
+rides the same turn as the tool call, and a rule that silenced every
+interim turn would take it too. So the first such message per request is
+allowed and the rest are dropped. Each new question gets its own allowance.
+
+Two rules hold whatever the value:
+
+- A turn with no tool calls is a final answer and always sends, including a
+  late subagent report arriving on a turn the bridge never saw a message for.
+- A turn that gets suppressed leaves the in-flight request untouched, so the
+  answer still has somewhere to go.
+
+Tool call summaries follow the same gate, which only matters with
+`"hideToolCalls": false`, since they only appear on tool-calling turns.
+
+With `"first"` or `"off"`, a tool-calling turn addressed to the sticky target is
+dropped as well. That is your terminal session narrating its work at your phone,
+and there is no request boundary there to count `"first"` against.
 
 ## Environment Variables
 

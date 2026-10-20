@@ -36,6 +36,14 @@ export default function (pi: ExtensionAPI): void {
   let pendingRemoteChat: PendingRemoteChat | null = null;
 
   /**
+   * Whether interim prose has already gone out for the request in flight, which
+   * is what `interimMessages: "first"` counts against. Reset whenever a new
+   * request arrives or the current one is answered, so every question gets its
+   * one acknowledgement and nothing more.
+   */
+  let interimSent = false;
+
+  /**
    * Notify the terminal of the session that currently owns the bridge. Silent
    * when no session owns it, which is the case between a shutdown and the
    * `session_start` that follows it.
@@ -238,6 +246,7 @@ export default function (pi: ExtensionAPI): void {
         messageId: msg.messageId,
       };
       runtime.stickyRemoteChat = pendingRemoteChat;
+      interimSent = false;
 
       const taggedMessage = `[📱 @${msg.username} via ${msg.transport}]: ${msg.content}`;
       pi.sendUserMessage(taggedMessage, { deliverAs: "followUp" });
@@ -294,6 +303,7 @@ export default function (pi: ExtensionAPI): void {
       pendingRemoteChat,
       stickyRemoteChat: runtime.stickyRemoteChat,
       config,
+      interimSent,
     });
 
     if (!plan.target || plan.text === "") return;
@@ -306,8 +316,13 @@ export default function (pi: ExtensionAPI): void {
         await transportManager.sendMessage(target.chatId, target.transport, chunk);
       }
 
+      // Counted only once the send worked, so a transport failure does not
+      // spend the request's one acknowledgement on a message nobody received.
+      if (plan.interim) interimSent = true;
+
       if (plan.clearPending) {
         pendingRemoteChat = null;
+        interimSent = false;
         typingHeartbeat.stop();
       }
     } catch (err) {
@@ -316,6 +331,7 @@ export default function (pi: ExtensionAPI): void {
         "error"
       );
       pendingRemoteChat = null;
+      interimSent = false;
       typingHeartbeat.stop();
     }
   });
@@ -342,6 +358,7 @@ export default function (pi: ExtensionAPI): void {
     typingHeartbeat.stop();
     runtime.inboundSink = null;
     pendingRemoteChat = null;
+    interimSent = false;
 
     if (event.reason !== "quit") return;
 

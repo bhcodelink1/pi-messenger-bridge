@@ -17,6 +17,7 @@ const sent: Send[] = [];
 const userMessages: string[] = [];
 let inboundHandler: ((msg: any) => void) | null = null;
 let disconnectAllCalls = 0;
+let failNextSend = 0;
 let config: Record<string, unknown> = {};
 
 vi.mock('../src/config', async (importOriginal) => {
@@ -53,6 +54,10 @@ vi.mock('../src/transports/manager', () => ({
     }
     onError(): void {}
     async sendMessage(chatId: string, transport: string, text: string): Promise<void> {
+      if (failNextSend > 0) {
+        failNextSend--;
+        throw new Error('telegram 429 too many requests');
+      }
       sent.push({ chatId, transport, text });
     }
     async sendTyping(): Promise<void> {}
@@ -146,6 +151,7 @@ beforeEach(async () => {
   userMessages.length = 0;
   inboundHandler = null;
   disconnectAllCalls = 0;
+  failNextSend = 0;
   config = { telegram: { token: 'test' }, hideToolCalls: true };
   // Transports and the sticky target live on globalThis for the lifetime of
   // the process, so each case has to clear them to start from a cold boot.
@@ -316,5 +322,95 @@ describe('session replacement', () => {
 
     expect(sent).toHaveLength(2);
     expect(sent[1]).toMatchObject({ chatId: '8341035574', transport: 'telegram' });
+  });
+});
+
+describe('interimMessages through the extension', () => {
+  it('"first" delivers one acknowledgement and the answer, and nothing between', async () => {
+    config.interimMessages = 'first';
+    const { turnStart } = await loadExtension();
+
+    inbound('find houses for sale in Barrington with 4 bedrooms');
+
+    // The pre-spawn acknowledgement is the one interim message allowed.
+    await turnStart(assistant([textBlock('Checking the Barrington listings for you.'), toolBlock('spawn')]));
+    expect(sent).toHaveLength(1);
+    expect(sent[0].text).toContain('Checking the Barrington listings');
+
+    // The narration a 30-call research run produces on the way to an answer.
+    await turnStart(assistant([textBlock('Zillow returned 403, retrying with headers.'), toolBlock('bash')]));
+    await turnStart(assistant([textBlock('PerimeterX again. Trying Movoto.'), toolBlock('bash')]));
+    await turnStart(assistant([textBlock('Movoto gave 12 rows, cross-checking Redfin.'), toolBlock('web_fetch')]));
+    expect(sent).toHaveLength(1);
+
+    // The report turn has no tool calls, so it is the answer and it lands.
+    await turnStart(assistant([textBlock('14 listings match. 9 on Zillow, 5 on Movoto.')]));
+    expect(sent).toHaveLength(2);
+    expect(sent[1].text).toContain('14 listings match');
+  });
+
+  it('gives the next request its own acknowledgement allowance', async () => {
+    config.interimMessages = 'first';
+    const { turnStart } = await loadExtension();
+
+    inbound('first question');
+    await turnStart(assistant([textBlock('On it.'), toolBlock('spawn')]));
+    await turnStart(assistant([textBlock('narration that must not arrive'), toolBlock('bash')]));
+    await turnStart(assistant([textBlock('first answer')]));
+    expect(sent).toHaveLength(2);
+
+    inbound('second question');
+    await turnStart(assistant([textBlock('On that one too.'), toolBlock('spawn')]));
+    expect(sent).toHaveLength(3);
+    expect(sent[2].text).toContain('On that one too');
+
+    await turnStart(assistant([textBlock('more narration'), toolBlock('bash')]));
+    expect(sent).toHaveLength(3);
+
+    await turnStart(assistant([textBlock('second answer')]));
+    expect(sent).toHaveLength(4);
+    expect(sent[3].text).toContain('second answer');
+  });
+
+  it('"off" sends only the answer', async () => {
+    config.interimMessages = 'off';
+    const { turnStart } = await loadExtension();
+
+    inbound('quiet question');
+    await turnStart(assistant([textBlock('Looking into it.'), toolBlock('spawn')]));
+    await turnStart(assistant([textBlock('half a thought'), toolBlock('bash')]));
+    expect(sent).toHaveLength(0);
+
+    await turnStart(assistant([textBlock('the answer')]));
+    expect(sent).toHaveLength(1);
+    expect(sent[0].text).toContain('the answer');
+  });
+
+  it('the default still forwards every turn, so the option is opt-in', async () => {
+    const { turnStart } = await loadExtension();
+
+    inbound('unchanged behaviour check');
+    await turnStart(assistant([textBlock('On it.'), toolBlock('spawn')]));
+    await turnStart(assistant([textBlock('narration one'), toolBlock('bash')]));
+    await turnStart(assistant([textBlock('the answer')]));
+
+    expect(sent).toHaveLength(3);
+  });
+
+  it('a failed send does not burn the allowance of the next request', async () => {
+    config.interimMessages = 'first';
+    const { turnStart } = await loadExtension();
+
+    inbound('question whose send hits a 429');
+    failNextSend = 1;
+    await turnStart(assistant([textBlock('On it.'), toolBlock('spawn')]));
+    expect(sent).toHaveLength(0);
+
+    // A failed send drops the in-flight request, which has to reset the
+    // allowance with it. The next request still gets its one acknowledgement.
+    inbound('next question');
+    await turnStart(assistant([textBlock('On that one too.'), toolBlock('spawn')]));
+    expect(sent).toHaveLength(1);
+    expect(sent[0].text).toContain('On that one too');
   });
 });

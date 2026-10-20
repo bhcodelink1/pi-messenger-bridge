@@ -15,6 +15,13 @@ export interface TurnReplyPlan {
     sticky: boolean;
     /** Clear the in-flight request after a successful send (the turn finished it). */
     clearPending: boolean;
+    /**
+     * True when this send carried interim prose, meaning the turn both produced
+     * assistant text and spawned more tool calls, so the request is still running.
+     * The caller records this to honour `interimMessages: "first"`, which allows
+     * one such message per request.
+     */
+    interim: boolean;
 }
 export interface TurnReplyInput {
     /** The assistant message that ended the turn. */
@@ -24,6 +31,11 @@ export interface TurnReplyInput {
     /** Last chat a message arrived from, kept so late turns still have somewhere to go. */
     stickyRemoteChat: PendingRemoteChat | null;
     config: MsgBridgeConfig;
+    /**
+     * True once interim prose has already been delivered for the request in
+     * flight. Ignored while `interimMessages` is `"all"`.
+     */
+    interimSent?: boolean;
 }
 /**
  * Decide what a completed turn delivers.
@@ -39,6 +51,15 @@ export interface TurnReplyInput {
  * assistant text only. Tool call summaries are left out on purpose, so a
  * session driven from the terminal does not spam the last messenger chat with
  * `🔧 tool (...)` lines.
+ *
+ * `interimMessages` controls the chatter between the question and the answer.
+ * A turn that ends in a tool call is by definition not the answer, and on a
+ * long research run each such turn was a phone notification carrying a
+ * half-thought. `"all"` keeps that behaviour. `"first"` lets one short
+ * acknowledgement through per request, which is what a pre-spawn "looking into
+ * it" line needs, and silences the rest. `"off"` sends nothing until a turn
+ * finishes without tool calls. A turn with no tool calls is the final answer
+ * and always sends, whatever the setting.
  */
 export declare function planTurnReply(input: TurnReplyInput): TurnReplyPlan;
 //# sourceMappingURL=reply-routing.d.ts.map
