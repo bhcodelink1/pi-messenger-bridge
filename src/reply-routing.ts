@@ -39,6 +39,14 @@ export interface TurnReplyInput {
    * flight. Ignored while `interimMessages` is `"all"`.
    */
   interimSent?: boolean;
+  /**
+   * Whether the previous turn already delivered this exact prose to a
+   * messenger. A subagent's progress note arrives as its own turn with no tool
+   * calls, so `interimMessages: "first"` cannot suppress it. Repeating text the
+   * user has already read is never useful, so the bridge drops the repeat.
+   * Ignored while `interimMessages` is `"all"`, which keeps the old behaviour.
+   */
+  lastSentText?: string;
 }
 
 const NO_REPLY: TurnReplyPlan = {
@@ -74,7 +82,7 @@ const NO_REPLY: TurnReplyPlan = {
  * and always sends, whatever the setting.
  */
 export function planTurnReply(input: TurnReplyInput): TurnReplyPlan {
-  const { message, pendingRemoteChat, stickyRemoteChat, config } = input;
+  const { message, pendingRemoteChat, stickyRemoteChat, config, lastSentText } = input;
   const mode = config.interimMessages ?? "all";
   const toolTurn = hasToolCalls(message);
 
@@ -111,6 +119,10 @@ export function planTurnReply(input: TurnReplyInput): TurnReplyPlan {
   // phone. There is no request boundary to count "first" against, so anything
   // short of "all" drops it.
   if (toolTurn && mode !== "all") return NO_REPLY;
+  // A subagent progress note lands here as a text-only turn, so the rule above
+  // cannot catch it. When the parent has already relayed the same words, this
+  // turn adds nothing and the user gets the identical message twice.
+  if (mode !== "all" && lastSentText === responseText) return NO_REPLY;
 
   return {
     target: stickyRemoteChat,

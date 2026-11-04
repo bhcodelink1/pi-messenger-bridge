@@ -24,6 +24,7 @@ function plan(options: {
   stickyRemoteChat?: PendingRemoteChat | null;
   config?: MsgBridgeConfig;
   interimSent?: boolean;
+  lastSentText?: string;
 }) {
   return planTurnReply({
     message: message(options.content ?? []),
@@ -31,6 +32,7 @@ function plan(options: {
     stickyRemoteChat: options.stickyRemoteChat ?? null,
     config: options.config ?? {},
     interimSent: options.interimSent,
+    lastSentText: options.lastSentText,
   });
 }
 
@@ -280,5 +282,44 @@ describe('planTurnReply interimMessages', () => {
     });
 
     expect(result.text).toContain('running the second query');
+  });
+});
+
+describe('planTurnReply dropping a repeated subagent note', () => {
+  const note = 'Hinsdale rerun in progress. Both portals are serving fine.';
+
+  it('drops a sticky text-only turn that repeats the prose already sent', () => {
+    const result = plan({
+      content: [textBlock(note)],
+      stickyRemoteChat: requester,
+      config: { interimMessages: 'first' },
+      lastSentText: note,
+    });
+
+    expect(result.target).toBeNull();
+    expect(result.text).toBe('');
+  });
+
+  it('sends a sticky subagent note the parent has not relayed', () => {
+    const result = plan({
+      content: [textBlock(note)],
+      stickyRemoteChat: requester,
+      config: { interimMessages: 'first' },
+      lastSentText: 'something else entirely',
+    });
+
+    expect(result.target).toBe(requester);
+    expect(result.text).toBe(note);
+  });
+
+  it('still repeats under interimMessages all', () => {
+    const result = plan({
+      content: [textBlock(note)],
+      stickyRemoteChat: requester,
+      config: { interimMessages: 'all' },
+      lastSentText: note,
+    });
+
+    expect(result.text).toBe(note);
   });
 });

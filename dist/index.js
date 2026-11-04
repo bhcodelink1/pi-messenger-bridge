@@ -2,7 +2,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { loadConfig, saveConfig } from "./config.js";
-import { splitMessage } from "./formatting.js";
+import { extractTextFromMessage, splitMessage } from "./formatting.js";
 import { acquireLock, releaseLock } from "./lock.js";
 import { planTurnReply } from "./reply-routing.js";
 import { getRuntime } from "./runtime.js";
@@ -37,6 +37,13 @@ export default function (pi) {
      * one acknowledgement and nothing more.
      */
     let interimSent = false;
+    /**
+     * The text of the last turn that ended with prose, whether or not the bridge
+     * was allowed to send it. A subagent note the parent already relayed is
+     * dropped by the rule in `planTurnReply`, so comparing against what the
+     * bridge sent would let the dropped copy out on the next turn.
+     */
+    let lastTurnProse = "";
     /**
      * Notify the terminal of the session that currently owns the bridge. Silent
      * when no session owns it, which is the case between a shutdown and the
@@ -207,6 +214,7 @@ export default function (pi) {
             };
             runtime.stickyRemoteChat = pendingRemoteChat;
             interimSent = false;
+            lastTurnProse = "";
             const taggedMessage = `[📱 @${msg.username} via ${msg.transport}]: ${msg.content}`;
             pi.sendUserMessage(taggedMessage, { deliverAs: "followUp" });
         };
@@ -259,7 +267,11 @@ export default function (pi) {
             stickyRemoteChat: runtime.stickyRemoteChat,
             config,
             interimSent,
+            lastSentText: lastTurnProse,
         });
+        const turnProse = extractTextFromMessage(event.message).trim();
+        if (turnProse !== "")
+            lastTurnProse = turnProse;
         if (!plan.target || plan.text === "")
             return;
         const target = plan.target;
@@ -283,6 +295,7 @@ export default function (pi) {
             notify(`Failed to send response to ${target.transport}: ${err.message}`, "error");
             pendingRemoteChat = null;
             interimSent = false;
+            lastTurnProse = "";
             typingHeartbeat.stop();
         }
     });
@@ -308,6 +321,7 @@ export default function (pi) {
         runtime.inboundSink = null;
         pendingRemoteChat = null;
         interimSent = false;
+        lastTurnProse = "";
         if (event.reason !== "quit")
             return;
         runtime.ctx = null;

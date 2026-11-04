@@ -36,6 +36,14 @@ export interface TurnReplyInput {
      * flight. Ignored while `interimMessages` is `"all"`.
      */
     interimSent?: boolean;
+    /**
+     * Whether the previous turn already delivered this exact prose to a
+     * messenger. A subagent's progress note arrives as its own turn with no tool
+     * calls, so `interimMessages: "first"` cannot suppress it. Repeating text the
+     * user has already read is never useful, so the bridge drops the repeat.
+     * Ignored while `interimMessages` is `"all"`, which keeps the old behaviour.
+     */
+    lastSentText?: string;
 }
 /**
  * Decide what a completed turn delivers.

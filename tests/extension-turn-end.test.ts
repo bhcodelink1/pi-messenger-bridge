@@ -349,6 +349,36 @@ describe('interimMessages through the extension', () => {
     expect(sent[1].text).toContain('14 listings match');
   });
 
+  it('drops a subagent progress note the parent already relayed', async () => {
+    config.interimMessages = 'first';
+    const { turnStart } = await loadExtension();
+
+    inbound('rerun the Hinsdale search and email it');
+
+    // The pre-spawn acknowledgement spends the one interim allowance.
+    await turnStart(assistant([textBlock('The rerun is underway.'), toolBlock('spawn')]));
+    expect(sent).toHaveLength(1);
+
+    const note =
+      'Hinsdale rerun in progress. Zillow returns 220 candidates; fetching detail pages.';
+
+    // The request is still open, but the interim allowance is spent, so the
+    // parent's tool-turn relay of the note is held back.
+    await turnStart(assistant([textBlock(note), toolBlock('bash')]));
+    expect(sent).toHaveLength(1);
+
+    // The same words land as the subagent's own report turn, which carries no
+    // tool calls and therefore has to send.
+    await turnStart(assistant([textBlock(note)]));
+    expect(sent).toHaveLength(2);
+    expect(sent[1].text).toContain('220 candidates');
+
+    // The next progress note repeats nothing, so it goes as well.
+    await turnStart(assistant([textBlock('Emailed the report: 148 matches.')]));
+    expect(sent).toHaveLength(3);
+    expect(sent[2].text).toContain('148 matches');
+  });
+
   it('gives the next request its own acknowledgement allowance', async () => {
     config.interimMessages = 'first';
     const { turnStart } = await loadExtension();
