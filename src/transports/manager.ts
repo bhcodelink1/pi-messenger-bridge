@@ -1,5 +1,5 @@
 import { withDeadline } from "../async-util.js";
-import type { ExternalMessage } from "../types.js";
+import type { ExternalMessage, OutgoingMedia } from "../types.js";
 import type { ITransportProvider } from "./interface.js";
 
 /**
@@ -98,6 +98,27 @@ export class TransportManager {
       throw new Error(`Transport ${transportType} not connected`);
     }
     await transport.sendMessage(chatId, text);
+  }
+
+  /**
+   * Send a file to a specific chat via a specific transport
+   */
+  async sendMedia(
+    chatId: string,
+    transportType: string,
+    media: OutgoingMedia
+  ): Promise<void> {
+    const transport = this.transports.get(transportType);
+    if (!transport) {
+      throw new Error(`Transport ${transportType} not found`);
+    }
+    if (!transport.isConnected) {
+      throw new Error(`Transport ${transportType} not connected`);
+    }
+    if (!transport.sendMedia) {
+      throw new Error(`${transportType} does not support file uploads`);
+    }
+    await transport.sendMedia(chatId, media);
   }
 
   /**

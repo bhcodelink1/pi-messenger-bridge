@@ -19,6 +19,7 @@ https://github.com/user-attachments/assets/cd64360e-e8cd-4820-a67f-bd127c5d6035
 - 🔧 Tool call visibility for remote users
 - ⌨️ Typing indicator that keeps refreshing while tools run
 - 📌 Sticky replies — work that finishes after its answer was already sent still reaches your phone
+- 🖼️ Attachments — photos you send reach the model as images, and `send_file` posts charts, pictures and PDFs back to the chat
 - 📝 Multi-turn conversation support
 - 🔑 Secure permissions (chmod 600 for config files, 700 for directories)
 
@@ -184,6 +185,7 @@ Example config:
   "typingRefreshMs": 4000,
   "stickyReplies": true,
   "interimMessages": "all",
+  "media": { "enabled": true, "maxBytes": 5242880, "maxImages": 4, "sendMaxBytes": 52428800 },
   "debug": false
 }
 ```
@@ -274,6 +276,43 @@ Tool call summaries follow the same gate, which only matters with
 With `"first"` or `"off"`, a tool-calling turn addressed to the sticky target is
 dropped as well. That is your terminal session narrating its work at your phone,
 and there is no request boundary there to count `"first"` against.
+
+### Media
+
+Attachments work in both directions on Telegram.
+
+A photo you send the bot is downloaded and handed to the model as an image
+block, so "what does this screenshot say" works from a phone. A caption becomes
+the message text. An image sent as a file keeps its real mime type and name.
+Telegram gives no mime type for album photos, so those arrive as `image/jpeg`.
+
+Outbound goes through the `send_file` tool, which takes a local path and an
+optional caption and posts the file to the chat in progress. Formats Telegram
+renders inline (`jpeg`, `png`, `gif`, `webp`, `bmp`, `tiff`) use `sendPhoto` and
+show as a preview up to 5 MB. Everything else, including SVG and PDF, uses
+`sendDocument` and arrives as a file card. Ask for a chart as PNG when you want
+it visible in the chat; an SVG arrives but does not preview.
+
+`media` limits all of it:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Turn attachment support off entirely |
+| `maxBytes` | 5 MB | Ceiling for one inbound attachment |
+| `maxImages` | 4 | Ceiling on attachments from one inbound message |
+| `sendMaxBytes` | 50 MB | Ceiling for a file `send_file` posts |
+
+Other transports accept the interface method but have no upload implementation
+yet, so `send_file` answers `"<transport> does not support file uploads"`.
+
+To check the real Telegram API after changing this code:
+
+```bash
+LIVE_TELEGRAM=1 npx vitest run tests/live-telegram.test.ts
+```
+
+It posts one photo and one document to your first trusted user, then downloads
+the stored photo back through the inbound path.
 
 ## Environment Variables
 

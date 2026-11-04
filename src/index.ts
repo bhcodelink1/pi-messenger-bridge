@@ -1,4 +1,9 @@
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type {
+  AssistantMessage,
+  ImageContent,
+  TextContent,
+} from "@earendil-works/pi-ai";
+import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import * as fs from "fs";
 import * as os from "os";
@@ -6,6 +11,11 @@ import * as path from "path";
 import { loadConfig, saveConfig } from "./config.js";
 import { extractTextFromMessage, splitMessage } from "./formatting.js";
 import { acquireLock, releaseLock } from "./lock.js";
+import {
+  DEFAULT_OUTBOUND_MAX_BYTES,
+  readOutgoingMedia,
+  resolveMediaSettings,
+} from "./media.js";
 import { planTurnReply } from "./reply-routing.js";
 import { getRuntime } from "./runtime.js";
 import { DiscordProvider } from "./transports/discord.js";
@@ -133,7 +143,11 @@ export default function (pi: ExtensionAPI): void {
     if (config.telegram?.token) {
       transportPromises.push(
         Promise.resolve().then(() => {
-          const telegramProvider = new TelegramProvider(config.telegram!.token, auth);
+          const telegramProvider = new TelegramProvider(
+            config.telegram!.token,
+            auth,
+            config.media
+          );
           transportManager.addTransport(telegramProvider);
         })
       );
@@ -258,7 +272,24 @@ export default function (pi: ExtensionAPI): void {
       lastTurnProse = "";
 
       const taggedMessage = `[📱 @${msg.username} via ${msg.transport}]: ${msg.content}`;
-      pi.sendUserMessage(taggedMessage, { deliverAs: "followUp" });
+
+      // A photo the user sent has to reach the model as an image block, which
+      // is what makes "what does this screenshot say" work from a phone. Text
+      // stays a plain string so a text-only message keeps the old shape.
+      const images: ImageContent[] = (msg.attachments ?? [])
+        .filter((a) => a.mimeType.startsWith("image/"))
+        .map((a) => ({ type: "image", data: a.data, mimeType: a.mimeType }));
+
+      if (images.length === 0) {
+        pi.sendUserMessage(taggedMessage, { deliverAs: "followUp" });
+        return;
+      }
+
+      const content: (TextContent | ImageContent)[] = [
+        { type: "text", text: taggedMessage },
+        ...images,
+      ];
+      pi.sendUserMessage(content, { deliverAs: "followUp" });
     };
 
     if (runtime.transportsBuilt) {
@@ -737,6 +768,63 @@ export default function (pi: ExtensionAPI): void {
         context.ui.notify(`Unknown subcommand: ${subcommand}. Run /msg-bridge help`, "warning");
         break;
     }
+    },
+  });
+
+  /**
+   * Tool: post a local file into the messenger chat in progress.
+   *
+   * A reply that names a path, like the chart links the vega-chart skill emits,
+   * is unreadable on a phone. This gives the model a way to deliver the bytes.
+   */
+  pi.registerTool({
+    name: "send_file",
+    label: "Send file to messenger",
+    description:
+      "Send an existing local file (image, chart, PDF) into the messenger chat currently in progress. " +
+      "Use this instead of writing a file path in a reply, which a phone cannot open.",
+    promptSnippet: "send_file — push a local file into the active messenger chat",
+    parameters: Type.Object({
+      filePath: Type.String({
+        description: "Absolute or relative path to an existing local file.",
+      }),
+      caption: Type.Optional(
+        Type.String({ description: "Optional caption posted with the file." })
+      ),
+    }),
+    execute: async (_toolCallId, params) => {
+      const textResult = (text: string) => ({
+        content: [{ type: "text" as const, text }],
+        details: undefined,
+      });
+
+      const target = pendingRemoteChat ?? runtime.stickyRemoteChat;
+      if (!target) {
+        return textResult(
+          "No messenger chat to send to. The user has to message the bot first."
+        );
+      }
+
+      const settings = resolveMediaSettings(loadConfig().media);
+      if (!settings.enabled) {
+        return textResult(
+          "Attachments are disabled (media.enabled is false in msg-bridge.json)."
+        );
+      }
+
+      try {
+        const media = readOutgoingMedia(
+          params.filePath,
+          settings.sendMaxBytes ?? DEFAULT_OUTBOUND_MAX_BYTES
+        );
+        media.caption = params.caption;
+        await transportManager.sendMedia(target.chatId, target.transport, media);
+        return textResult(
+          `Sent ${media.fileName ?? params.filePath} (${media.mimeType}) to ${target.transport}.`
+        );
+      } catch (err) {
+        return textResult(`Failed to send file: ${(err as Error).message}`);
+      }
     },
   });
 }

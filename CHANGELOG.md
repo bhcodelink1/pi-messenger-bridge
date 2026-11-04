@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Image attachments, both directions, on Telegram. A photo sent to the bot is downloaded through `getFile`/`downloadFile` and handed to `pi.sendUserMessage` as an `ImageContent` block, so the model sees the picture instead of the message being dropped. A caption supplies the text, and an image sent as a file keeps its mime type and name. Outbound is a new `send_file` tool that posts a local file to the chat in progress, using `sendPhoto` for formats Telegram previews under 5 MB and `sendDocument` for the rest, which is also the only route for SVG and PDF. `TransportManager.sendMedia` routes it and reports `"<transport> does not support file uploads"` for transports without an implementation. New `media` config block sets `enabled`, `maxBytes` (5 MB), `maxImages` (4) and `sendMaxBytes` (50 MB). `tests/live-telegram.test.ts` runs a real round trip against the bot with `LIVE_TELEGRAM=1`
+
 ### Fixed
+- A photo sent to the Telegram bot produced no reply at all. `handleMessage` required `msg.text`, and a photo carries `msg.photo` with no `msg.text`, so the guard returned before the authorization check. A captioned photo passed the guard and lost the image, because only `msg.text` was forwarded
 - Session creation and session switching stalled for 5-10 seconds. Pi awaits every `session_shutdown` handler before it builds the next session, and the bridge's handler awaited `transportManager.disconnectAll()`. Telegram's `stopPolling()` with no options waits for the in-flight `getUpdates` long-poll to come back from the server, which is `polling.params.timeout` (10 seconds by default), so `/new`, `/clear`, `/resume`, fork, clone, `/reload` and quit each froze the terminal until Telegram answered. Measured against the real bot: 9242ms before, 0ms after. `disconnect()` now passes `{ cancel: true }`, `TransportManager.disconnectAll()` takes a 1 second deadline so no transport can block Pi at all, and Matrix's `client.stop()` is bounded the same way
 
 ### Changed

@@ -20,6 +20,52 @@ export interface ExternalMessage {
   isGroupChat: boolean;
   /** Was the bot mentioned? (for group chats) */
   wasMentioned?: boolean;
+  /**
+   * Binary attachments carried by the message, for example a Telegram photo.
+   * Empty or absent means the message was text only.
+   */
+  attachments?: RemoteAttachment[];
+}
+
+/**
+ * A file that arrived with an inbound messenger message.
+ */
+export interface RemoteAttachment {
+  /** MIME type, e.g. "image/jpeg" */
+  mimeType: string;
+  /** File bytes, base64 encoded without a data URI prefix */
+  data: string;
+  /** Original file name, when the messenger supplied one */
+  fileName?: string;
+}
+
+/**
+ * A file the bridge sends into a messenger chat.
+ */
+export interface OutgoingMedia {
+  /** File bytes */
+  data: Buffer;
+  /** MIME type, e.g. "image/png" */
+  mimeType: string;
+  /** File name shown by the messenger */
+  fileName?: string;
+  /** Optional caption posted alongside the file */
+  caption?: string;
+}
+
+/**
+ * Attachment limits. Every field is optional and falls back to a default in
+ * `resolveMediaSettings`.
+ */
+export interface MediaSettings {
+  /** Turn attachment support off entirely. Default: on. */
+  enabled?: boolean;
+  /** Ceiling for one inbound attachment, in bytes. Default: 5 MB. */
+  maxBytes?: number;
+  /** Ceiling on attachments taken from one inbound message. Default: 4. */
+  maxImages?: number;
+  /** Ceiling for a file the agent pushes to a chat, in bytes. Default: 50 MB. */
+  sendMaxBytes?: number;
 }
 
 /**
@@ -79,6 +125,8 @@ export interface MsgBridgeConfig {
    * since they only appear on tool-calling turns anyway.
    */
   interimMessages?: "all" | "first" | "off";
+  /** Inbound and outbound file attachments. */
+  media?: MediaSettings;
   /** Show a typing indicator while pi works on a remote request (default true). */
   typingIndicator?: boolean;
   /**

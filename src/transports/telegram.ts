@@ -1,7 +1,21 @@
+import * as fs from "fs";
 import type TelegramBot from "node-telegram-bot-api";
+import * as os from "os";
+import * as path from "path";
 import { withDeadline } from "../async-util.js";
 import type { ChallengeAuth } from "../auth/challenge-auth.js";
-import type { ExternalMessage } from "../types.js";
+import {
+  formatBytes,
+  mimeFromPath,
+  resolveMediaSettings,
+  sendMethodFor,
+} from "../media.js";
+import type {
+  ExternalMessage,
+  MediaSettings,
+  OutgoingMedia,
+  RemoteAttachment,
+} from "../types.js";
 import type { ITransportProvider } from "./interface.js";
 
 /** How long to wait for the first getUpdates before treating connect as done. */
@@ -20,7 +34,8 @@ export class TelegramProvider implements ITransportProvider {
 
   constructor(
     private token: string,
-    private auth: ChallengeAuth
+    private auth: ChallengeAuth,
+    private mediaSettings?: MediaSettings
   ) {}
 
   get isConnected(): boolean {
@@ -143,6 +158,38 @@ export class TelegramProvider implements ITransportProvider {
     await this.bot.sendChatAction(chatId, "typing");
   }
 
+  /**
+   * Send a file. Images Telegram can render go out through `sendPhoto` and show
+   * as an inline preview; everything else, including SVG and PDF, goes through
+   * `sendDocument`, which is also the only route above 5 MB.
+   *
+   * The caption is sent as plain text. MarkdownV1 in a caption hits the same
+   * parse errors the body text did before `formatForTelegram` existed, and a
+   * caption is not worth that failure mode.
+   */
+  async sendMedia(chatId: string, media: OutgoingMedia): Promise<void> {
+    if (!this.bot) {
+      throw new Error("Telegram bot not connected");
+    }
+    const caption = media.caption?.trim() || undefined;
+    if (sendMethodFor(media.mimeType, media.data.length) === "photo") {
+      await this.bot.sendPhoto(chatId, media.data, { caption }, {
+        filename: media.fileName ?? "photo.jpg",
+        contentType: media.mimeType,
+      });
+      return;
+    }
+    // contentType is required, not cosmetic. node-telegram-bot-api sniffs a
+    // Buffer's magic bytes when it is missing, and SVG or PDF-as-text has no
+    // signature, so the call throws `Unsupported Buffer file-type`.
+    await this.bot.sendDocument(
+      chatId,
+      media.data,
+      { caption },
+      { filename: media.fileName, contentType: media.mimeType }
+    );
+  }
+
   onMessage(handler: (message: ExternalMessage) => void): void {
     this.messageHandler = handler;
   }
@@ -158,8 +205,20 @@ export class TelegramProvider implements ITransportProvider {
     }
     this.lastProcessedMessageId = msg.message_id;
 
-    // Only process text messages
-    if (!msg.text || !msg.from) {
+    // A photo arrives as msg.photo with no msg.text, and a captioned photo puts
+    // the caption in msg.caption. Requiring msg.text here used to drop both
+    // kinds before the auth check, which is why sending the bot a picture
+    // produced no reply at all.
+    if (!msg.from) {
+      return;
+    }
+
+    const mediaSettings = resolveMediaSettings(this.mediaSettings);
+    const attachments = mediaSettings.enabled
+      ? await this.collectAttachments(msg, mediaSettings)
+      : [];
+    const text = msg.text ?? msg.caption ?? "";
+    if (!text && attachments.length === 0) {
       return;
     }
 
@@ -174,11 +233,11 @@ export class TelegramProvider implements ITransportProvider {
       const botInfo = await this.bot.getMe();
       const botUsername = botInfo.username;
       wasMentioned =
-        msg.text.includes(`@${botUsername}`) ||
+        text.includes(`@${botUsername}`) ||
         (msg.entities?.some(
           (entity) =>
             entity.type === "mention" &&
-            msg.text!.substring(entity.offset, entity.offset + entity.length) ===
+            text.substring(entity.offset, entity.offset + entity.length) ===
               `@${botUsername}`
         ) ?? false);
     }
@@ -201,9 +260,9 @@ export class TelegramProvider implements ITransportProvider {
     );
 
     // Handle admin commands and challenge codes in DM (before auth check!)
-    if (!isGroupChat && (msg.text.startsWith("/") || msg.text.match(/^\d{6}$/))) {
+    if (!isGroupChat && (text.startsWith("/") || text.match(/^\d{6}$/))) {
       const handled = await this.auth.handleAdminCommand(
-        msg.text,
+        text,
         chatId,
         userId,
         async (text) => await this.sendMessage(chatId, text),
@@ -219,7 +278,7 @@ export class TelegramProvider implements ITransportProvider {
     }
 
     // Strip bot mention from message if present
-    let content = msg.text;
+    let content = text;
     if (wasMentioned && this.bot) {
       const botInfo = await this.bot.getMe();
       const botUsername = botInfo.username;
@@ -227,7 +286,7 @@ export class TelegramProvider implements ITransportProvider {
     }
 
     // Forward to message handler
-    if (this.messageHandler && content) {
+    if (this.messageHandler && (content || attachments.length > 0)) {
       const externalMessage: ExternalMessage = {
         chatId,
         transport: this.type,
@@ -238,9 +297,111 @@ export class TelegramProvider implements ITransportProvider {
         messageId: msg.message_id.toString(),
         isGroupChat,
         wasMentioned,
+        attachments,
       };
 
       this.messageHandler(externalMessage);
+    }
+  }
+
+  /**
+   * Download whatever images the message carries.
+   *
+   * Telegram sends a photo as an array of pre-cropped sizes, so the largest
+   * entry is the one worth fetching. An image sent as a file lands in
+   * `msg.document` instead, with a real mime type and file name.
+   *
+   * A download that fails is skipped rather than raised. Losing one attachment
+   * should not cost the user the caption they typed with it.
+   */
+  private async collectAttachments(
+    msg: TelegramBot.Message,
+    settings: MediaSettings
+  ): Promise<RemoteAttachment[]> {
+    if (!this.bot) return [];
+
+    const candidates: Array<{
+      fileId: string;
+      mimeType: string;
+      fileName?: string;
+      size?: number;
+    }> = [];
+
+    if (msg.photo && msg.photo.length > 0) {
+      const largest = msg.photo.reduce((best, size) =>
+        (size.file_size ?? 0) > (best.file_size ?? 0) ? size : best
+      );
+      candidates.push({
+        fileId: largest.file_id,
+        // Telegram gives no mime type for photos. JPEG matches what it stores
+        // for anything it re-encoded; a PNG or SVG the user sent as a file
+        // arrives through msg.document with the real type instead.
+        mimeType: "image/jpeg",
+        size: largest.file_size,
+      });
+    } else if (msg.document?.mime_type?.startsWith("image/")) {
+      candidates.push({
+        fileId: msg.document.file_id,
+        mimeType:
+          msg.document.mime_type ??
+          mimeFromPath(msg.document.file_name ?? "") ??
+          "image/jpeg",
+        fileName: msg.document.file_name,
+        size: msg.document.file_size,
+      });
+    }
+
+    const attachments: RemoteAttachment[] = [];
+    for (const candidate of candidates.slice(0, settings.maxImages ?? 4)) {
+      if (candidate.size && candidate.size > (settings.maxBytes ?? 0)) {
+        this.errorHandler?.(
+          new Error(
+            `Skipped ${candidate.fileName ?? "photo"}: ${formatBytes(candidate.size)} over the ${formatBytes(settings.maxBytes ?? 0)} limit`
+          )
+        );
+        continue;
+      }
+      try {
+        attachments.push(await this.downloadAttachment(candidate));
+      } catch (err) {
+        this.errorHandler?.(
+          new Error(`Attachment download failed: ${(err as Error).message}`)
+        );
+      }
+    }
+    return attachments;
+  }
+
+  /**
+   * Fetch one Telegram file and return it as base64.
+   *
+   * `downloadFile` writes into a directory it does not create, so each file gets
+   * its own temp directory, removed afterwards. Telegram expires the file about
+   * an hour after the message arrives, which is why the bytes have to be read
+   * now rather than handed to a later turn as an id.
+   */
+  private async downloadAttachment(candidate: {
+    fileId: string;
+    mimeType: string;
+    fileName?: string;
+  }): Promise<RemoteAttachment> {
+    const bot = this.bot!;
+    const file = await bot.getFile(candidate.fileId);
+    if (!file.file_path) {
+      throw new Error(`Telegram returned no file path for ${candidate.fileId}`);
+    }
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "msg-bridge-"));
+    try {
+      const written = await bot.downloadFile(candidate.fileId, dir);
+      const data = fs.readFileSync(written).toString("base64");
+      return {
+        mimeType: candidate.mimeType,
+        data,
+        fileName: candidate.fileName ?? path.basename(written),
+      };
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   }
 }

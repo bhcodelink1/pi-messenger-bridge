@@ -69,3 +69,66 @@ describe('TransportManager.disconnectAll', () => {
     await expect(manager.disconnectAll(50)).resolves.toBeUndefined();
   });
 });
+
+describe('TransportManager.sendMedia', () => {
+  const media = { data: Buffer.from([1, 2, 3]), mimeType: 'image/png', fileName: 'a.png' };
+
+  it('routes a file to the transport that supports uploads', async () => {
+    const calls: Array<{ chatId: string; fileName?: string }> = [];
+    const manager = new TransportManager();
+    manager.addTransport({
+      type: 'telegram',
+      isConnected: true,
+      connect: async () => {},
+      disconnect: async () => {},
+      sendMessage: async () => {},
+      sendMedia: async (chatId: string, m: any) => {
+        calls.push({ chatId, fileName: m.fileName });
+      },
+      sendTyping: async () => {},
+      onMessage: () => {},
+      onError: () => {},
+    } as unknown as ITransportProvider);
+
+    await manager.sendMedia('55', 'telegram', media);
+
+    expect(calls).toEqual([{ chatId: '55', fileName: 'a.png' }]);
+  });
+
+  it('names the transport when it cannot upload files', async () => {
+    const manager = new TransportManager();
+    manager.addTransport({
+      type: 'slack',
+      isConnected: true,
+      connect: async () => {},
+      disconnect: async () => {},
+      sendMessage: async () => {},
+      sendTyping: async () => {},
+      onMessage: () => {},
+      onError: () => {},
+    } as unknown as ITransportProvider);
+
+    await expect(manager.sendMedia('C123', 'slack', media)).rejects.toThrow(
+      /slack does not support file uploads/
+    );
+  });
+
+  it('refuses to send through a transport that is not connected', async () => {
+    const manager = new TransportManager();
+    manager.addTransport({
+      type: 'telegram',
+      isConnected: false,
+      connect: async () => {},
+      disconnect: async () => {},
+      sendMessage: async () => {},
+      sendMedia: async () => {},
+      sendTyping: async () => {},
+      onMessage: () => {},
+      onError: () => {},
+    } as unknown as ITransportProvider);
+
+    await expect(manager.sendMedia('55', 'telegram', media)).rejects.toThrow(
+      /not connected/
+    );
+  });
+});

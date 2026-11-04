@@ -1,4 +1,4 @@
-import type { ExternalMessage } from "../types.js";
+import type { ExternalMessage, OutgoingMedia } from "../types.js";
 
 /**
  * Transport provider interface
@@ -28,6 +28,15 @@ export interface ITransportProvider {
    * @param text - Message content
    */
   sendMessage(chatId: string, text: string): Promise<void>;
+
+  /**
+   * Send a file to a chat. Optional, because not every messenger lets a bot
+   * upload. A transport that omits it leaves `TransportManager.sendMedia` to
+   * report the gap as an error instead of failing at typecheck time.
+   * @param chatId - Chat/channel identifier
+   * @param media - File bytes, mime type, and optional caption
+   */
+  sendMedia?(chatId: string, media: OutgoingMedia): Promise<void>;
 
   /**
    * Send typing indicator to a chat

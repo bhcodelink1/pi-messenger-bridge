@@ -79,6 +79,22 @@ export class TransportManager {
         await transport.sendMessage(chatId, text);
     }
     /**
+     * Send a file to a specific chat via a specific transport
+     */
+    async sendMedia(chatId, transportType, media) {
+        const transport = this.transports.get(transportType);
+        if (!transport) {
+            throw new Error(`Transport ${transportType} not found`);
+        }
+        if (!transport.isConnected) {
+            throw new Error(`Transport ${transportType} not connected`);
+        }
+        if (!transport.sendMedia) {
+            throw new Error(`${transportType} does not support file uploads`);
+        }
+        await transport.sendMedia(chatId, media);
+    }
+    /**
      * Send typing indicator to a chat via a specific transport
      */
     async sendTyping(chatId, transportType) {

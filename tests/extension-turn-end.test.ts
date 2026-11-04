@@ -7,14 +7,21 @@
  * later turn (a subagent report arriving minutes afterwards) must still reach
  * the same chat.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import { resetRuntime } from '../src/runtime';
 
 type Send = { chatId: string; transport: string; text: string };
 
+type ToolCall = { name: string; params: Record<string, unknown> };
+
 const sent: Send[] = [];
-const userMessages: string[] = [];
+const mediaSent: Array<{ chatId: string; transport: string; media: any }> = [];
+const userMessages: any[] = [];
+const tools = new Map<string, any>();
 let inboundHandler: ((msg: any) => void) | null = null;
 let disconnectAllCalls = 0;
 let failNextSend = 0;
@@ -61,6 +68,9 @@ vi.mock('../src/transports/manager', () => ({
       sent.push({ chatId, transport, text });
     }
     async sendTyping(): Promise<void> {}
+    async sendMedia(chatId: string, transport: string, media: any): Promise<void> {
+      mediaSent.push({ chatId, transport, media });
+    }
   },
 }));
 
@@ -107,6 +117,9 @@ async function loadExtension() {
       handlers.set(type, handler);
     },
     registerCommand: () => {},
+    registerTool: (tool: any) => {
+      tools.set(tool.name, tool);
+    },
     sendUserMessage: (text: string) => {
       userMessages.push(text);
     },
@@ -122,6 +135,8 @@ async function loadExtension() {
     shutdown: (reason: string) =>
       handlers.get('session_shutdown')?.({ reason }, context),
     start: (reason = 'new') => handlers.get('session_start')?.({ reason }, context),
+    callTool: (name: string, params: Record<string, unknown>) =>
+      tools.get(name).execute('tc-1', params),
     ui,
   };
 }
@@ -133,7 +148,7 @@ function assistant(content: unknown[]): AssistantMessage {
   return { role: 'assistant', content } as unknown as AssistantMessage;
 }
 
-function inbound(content: string) {
+function inbound(content: string, attachments?: unknown[]) {
   inboundHandler?.({
     chatId: '8341035574',
     transport: 'telegram',
@@ -143,12 +158,15 @@ function inbound(content: string) {
     userId: '8341035574',
     timestamp: new Date(),
     isGroupChat: false,
+    attachments,
   });
 }
 
 beforeEach(async () => {
   sent.length = 0;
+  mediaSent.length = 0;
   userMessages.length = 0;
+  tools.clear();
   inboundHandler = null;
   disconnectAllCalls = 0;
   failNextSend = 0;
@@ -442,5 +460,86 @@ describe('interimMessages through the extension', () => {
     await turnStart(assistant([textBlock('On that one too.'), toolBlock('spawn')]));
     expect(sent).toHaveLength(1);
     expect(sent[0].text).toContain('On that one too');
+  });
+});
+
+describe('attachments through the extension', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ext-media-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('hands a photo to the model as an image block', async () => {
+    await loadExtension();
+
+    inbound('what is in this picture', [{ mimeType: 'image/png', data: 'iVBORw0KGgo=' }]);
+
+    const content = userMessages[0] as any[];
+    expect(Array.isArray(content)).toBe(true);
+    expect(content[0].text).toContain('via telegram');
+    expect(content[1]).toEqual({ type: 'image', data: 'iVBORw0KGgo=', mimeType: 'image/png' });
+  });
+
+  it('keeps a text-only message a plain string', async () => {
+    await loadExtension();
+
+    inbound('hello');
+
+    expect(typeof userMessages[0]).toBe('string');
+  });
+
+  it('send_file posts a local file to the chat in progress', async () => {
+    const { callTool } = await loadExtension();
+    inbound('send me the chart');
+
+    const file = path.join(dir, 'chart.png');
+    fs.writeFileSync(file, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
+    const result = await callTool('send_file', { filePath: file, caption: 'here' });
+
+    expect(mediaSent).toHaveLength(1);
+    expect(mediaSent[0].chatId).toBe('8341035574');
+    expect(mediaSent[0].transport).toBe('telegram');
+    expect(mediaSent[0].media.fileName).toBe('chart.png');
+    expect(mediaSent[0].media.caption).toBe('here');
+    expect(result.content[0].text).toContain('Sent chart.png');
+  });
+
+  it('send_file says so when no messenger chat exists', async () => {
+    const { callTool } = await loadExtension();
+    const file = path.join(dir, 'chart.png');
+    fs.writeFileSync(file, Buffer.from([1]));
+
+    const result = await callTool('send_file', { filePath: file });
+
+    expect(mediaSent).toHaveLength(0);
+    expect(result.content[0].text).toContain('No messenger chat');
+  });
+
+  it('send_file respects media.enabled false', async () => {
+    config.media = { enabled: false };
+    const { callTool } = await loadExtension();
+    inbound('send me the chart');
+    const file = path.join(dir, 'chart.png');
+    fs.writeFileSync(file, Buffer.from([1]));
+
+    const result = await callTool('send_file', { filePath: file });
+
+    expect(mediaSent).toHaveLength(0);
+    expect(result.content[0].text).toContain('disabled');
+  });
+
+  it('send_file reports a missing file without throwing', async () => {
+    const { callTool } = await loadExtension();
+    inbound('send me the chart');
+
+    const result = await callTool('send_file', { filePath: path.join(dir, 'gone.png') });
+
+    expect(result.content[0].text).toContain('File not found');
   });
 });

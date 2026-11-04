@@ -1,4 +1,4 @@
-import type { ExternalMessage } from "../types.js";
+import type { ExternalMessage, OutgoingMedia } from "../types.js";
 import type { ITransportProvider } from "./interface.js";
 /**
  * Manages multiple transport providers and routes messages
@@ -34,6 +34,10 @@ export declare class TransportManager {
      * Send a message to a specific chat via a specific transport
      */
     sendMessage(chatId: string, transportType: string, text: string): Promise<void>;
+    /**
+     * Send a file to a specific chat via a specific transport
+     */
+    sendMedia(chatId: string, transportType: string, media: OutgoingMedia): Promise<void>;
     /**
      * Send typing indicator to a chat via a specific transport
      */
