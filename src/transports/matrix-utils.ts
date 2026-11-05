@@ -52,6 +52,58 @@ export function formatForMatrix(text: string): { body: string; formattedBody?: s
 }
 
 /**
+ * A media reference pulled out of a Matrix message event.
+ *
+ * Matrix stores a file in the media repository and points at it. An unencrypted
+ * event carries `url` (an `mxc://` URI); an encrypted one carries a `file`
+ * object holding the same URI plus the AES key and SHA-256 hash needed to
+ * decrypt the download. Callers need both shapes, so both are surfaced.
+ */
+export interface MatrixMediaRef {
+  /** `mxc://` URI for an unencrypted upload */
+  mxc?: string;
+  /** Encrypted file descriptor (key, hash, iv) for an E2EE upload */
+  file?: any;
+  mimeType: string;
+  fileName?: string;
+  size?: number;
+}
+
+/**
+ * Extract an image reference from event content, or null when the event carries
+ * no image worth downloading.
+ *
+ * Photos arrive as `m.image`. A picture sent as a file arrives as `m.file` with
+ * an `image/*` mimetype, which is how Element sends a PNG or SVG that it chose
+ * not to treat as a photo. Everything else (video, audio, arbitrary files) is
+ * ignored because the model has no way to use it.
+ */
+export function mediaFromContent(content: any): MatrixMediaRef | null {
+  if (!content?.msgtype) return null;
+
+  const fileObj = content.file;
+  const mxc = content.url ?? fileObj?.url;
+  if (!mxc) return null;
+
+  const mimeType: string = content.info?.mimetype ?? content.mimetype ?? "";
+  const isImage =
+    content.msgtype === "m.image" ||
+    (content.msgtype === "m.file" && mimeType.startsWith("image/"));
+  if (!isImage) return null;
+
+  const fileName =
+    content.filename ?? (typeof content.body === "string" ? content.body : undefined);
+
+  return {
+    mxc,
+    file: fileObj ?? undefined,
+    mimeType: mimeType || "image/jpeg",
+    fileName,
+    size: typeof content.info?.size === "number" ? content.info.size : undefined,
+  };
+}
+
+/**
  * Determine whether to skip a Matrix room event before processing.
  * Returns a reason string if the event should be skipped, or null if it should be processed.
  */
@@ -69,9 +121,13 @@ export function shouldSkipEvent(
   const eventTs = event.origin_server_ts || 0;
   if (eventTs < connectedAt) return "stale";
 
-  // Only process text messages
+  // Text messages, and image messages that carry a file, are both processable.
+  // An image used to fall through to "not_text" here, which meant a photo sent
+  // to the bot produced no reply at all.
   const content = event.content;
-  if (!content || content.msgtype !== "m.text" || !content.body) return "not_text";
+  if (!content?.msgtype) return "not_text";
+  const isText = content.msgtype === "m.text" && !!content.body;
+  if (!isText && !mediaFromContent(content)) return "not_text";
 
   // Ignore edits (we only process original messages)
   if (content["m.new_content"]) return "edit";

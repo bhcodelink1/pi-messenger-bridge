@@ -4,6 +4,7 @@ import {
   escapeHtml,
   extractUsername,
   formatForMatrix,
+  mediaFromContent,
   shouldSkipEvent,
   stripBotMention,
   wasBotMentioned,
@@ -149,9 +150,48 @@ describe("shouldSkipEvent", () => {
       .toBe("stale");
   });
 
-  it("skips non-text messages", () => {
+  it("skips an image event that carries no media reference", () => {
     expect(shouldSkipEvent(makeEvent({ content: { msgtype: "m.image", body: "photo" } }), botUserId, connectedAt, joinedRooms, "!room1:matrix.org"))
       .toBe("not_text");
+  });
+
+  it("processes an image event that carries an mxc url", () => {
+    expect(shouldSkipEvent(
+      makeEvent({ content: { msgtype: "m.image", body: "photo", url: "mxc://srv/abc" } }),
+      botUserId, connectedAt, joinedRooms, "!room1:matrix.org"
+    )).toBeNull();
+  });
+
+  it("processes a picture sent as a file", () => {
+    expect(shouldSkipEvent(
+      makeEvent({
+        content: {
+          msgtype: "m.file",
+          body: "diagram.png",
+          url: "mxc://srv/abc",
+          info: { mimetype: "image/png" },
+        },
+      }),
+      botUserId, connectedAt, joinedRooms, "!room1:matrix.org"
+    )).toBeNull();
+  });
+
+  it("still skips video and non-image files", () => {
+    expect(shouldSkipEvent(
+      makeEvent({ content: { msgtype: "m.video", body: "clip", url: "mxc://srv/v" } }),
+      botUserId, connectedAt, joinedRooms, "!room1:matrix.org"
+    )).toBe("not_text");
+    expect(shouldSkipEvent(
+      makeEvent({
+        content: {
+          msgtype: "m.file",
+          body: "notes.pdf",
+          url: "mxc://srv/p",
+          info: { mimetype: "application/pdf" },
+        },
+      }),
+      botUserId, connectedAt, joinedRooms, "!room1:matrix.org"
+    )).toBe("not_text");
   });
 
   it("skips messages with no content", () => {
@@ -322,3 +362,49 @@ describe("escapeHtml properties", () => {
 // - sendMessage()/sendTyping() (thin SDK wrappers)
 // - index.ts wiring (env var reading, command handler plumbing)
 // - Widget abbreviation (mx)
+
+// ─── mediaFromContent ─────────────────────────────────────────
+
+describe("mediaFromContent", () => {
+  it("reads a plain image upload", () => {
+    const ref = mediaFromContent({
+      msgtype: "m.image",
+      body: "photo.jpg",
+      url: "mxc://example.org/abc",
+      info: { mimetype: "image/jpeg", size: 4096 },
+    });
+
+    expect(ref).toEqual({
+      mxc: "mxc://example.org/abc",
+      file: undefined,
+      mimeType: "image/jpeg",
+      fileName: "photo.jpg",
+      size: 4096,
+    });
+  });
+
+  it("reads an encrypted upload whose uri lives inside the file object", () => {
+    const descriptor = { url: "mxc://example.org/enc", key: {}, iv: "aaa", hash: "bbb", v: "v2" };
+    const ref = mediaFromContent({ msgtype: "m.image", body: "shot.png", file: descriptor });
+
+    expect(ref?.mxc).toBe("mxc://example.org/enc");
+    expect(ref?.file).toBe(descriptor);
+    expect(ref?.mimeType).toBe("image/jpeg");
+  });
+
+  it("prefers the filename field over the caption body", () => {
+    const ref = mediaFromContent({
+      msgtype: "m.image",
+      body: "look at this",
+      filename: "chart.png",
+      url: "mxc://example.org/c",
+    });
+
+    expect(ref?.fileName).toBe("chart.png");
+  });
+
+  it("returns null when there is no media reference", () => {
+    expect(mediaFromContent({ msgtype: "m.text", body: "hi" })).toBeNull();
+    expect(mediaFromContent(undefined)).toBeNull();
+  });
+});

@@ -19,7 +19,7 @@ https://github.com/user-attachments/assets/cd64360e-e8cd-4820-a67f-bd127c5d6035
 - 🔧 Tool call visibility for remote users
 - ⌨️ Typing indicator that keeps refreshing while tools run
 - 📌 Sticky replies — work that finishes after its answer was already sent still reaches your phone
-- 🖼️ Attachments — photos you send reach the model as images, and `send_file` posts charts, pictures and PDFs back to the chat
+- 🖼️ Attachments on Telegram and Matrix — photos you send reach the model as images, and `send_file` posts charts, pictures and PDFs back to the chat
 - 📝 Multi-turn conversation support
 - 🔑 Secure permissions (chmod 600 for config files, 700 for directories)
 
@@ -279,7 +279,7 @@ and there is no request boundary there to count `"first"` against.
 
 ### Media
 
-Attachments work in both directions on Telegram.
+Attachments work in both directions on Telegram and Matrix.
 
 A photo you send the bot is downloaded and handed to the model as an image
 block, so "what does this screenshot say" works from a phone. A caption becomes
@@ -293,6 +293,15 @@ show as a preview up to 5 MB. Everything else, including SVG and PDF, uses
 `sendDocument` and arrives as a file card. Ask for a chart as PNG when you want
 it visible in the chat; an SVG arrives but does not preview.
 
+On Matrix, a photo (`m.image`) or a picture sent as a file (`m.file` with an
+`image/*` mimetype) is downloaded from the media repository and handed to the
+model the same way. In an encrypted room the file is decrypted through the Rust
+crypto store first. Outbound uploads go to `/_matrix/media` and post `m.image`
+for images or `m.file` for anything else; in an encrypted room the bytes are
+encrypted with `encryptMedia` before upload, so the homeserver never sees the
+plaintext. Video, audio and arbitrary files are ignored on the way in because
+the model cannot use them.
+
 `media` limits all of it:
 
 | Key | Default | Meaning |
@@ -302,13 +311,23 @@ it visible in the chat; an SVG arrives but does not preview.
 | `maxImages` | 4 | Ceiling on attachments from one inbound message |
 | `sendMaxBytes` | 50 MB | Ceiling for a file `send_file` posts |
 
-Other transports accept the interface method but have no upload implementation
-yet, so `send_file` answers `"<transport> does not support file uploads"`.
+Slack, Discord and WhatsApp accept the interface method but have no upload
+implementation yet, so `send_file` answers `"<transport> does not support file
+uploads"`.
 
 To check the real Telegram API after changing this code:
 
 ```bash
 LIVE_TELEGRAM=1 npx vitest run tests/live-telegram.test.ts
+```
+
+To check a real homeserver, unencrypted and encrypted, you need a throwaway
+Matrix server with two accounts and fresh login tokens:
+
+```bash
+LIVE_MATRIX=1 MATRIX_URL=http://localhost:8008 \
+  MATRIX_BOT_TOKEN=... MATRIX_USER_TOKEN=... \
+  npx vitest run tests/live-matrix.test.ts
 ```
 
 It posts one photo and one document to your first trusted user, then downloads

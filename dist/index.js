@@ -149,7 +149,7 @@ export default function (pi) {
         }
         if (config.matrix?.homeserverUrl && config.matrix?.accessToken) {
             transportPromises.push(Promise.resolve().then(() => {
-                const matrixProvider = new MatrixProvider(config.matrix, auth);
+                const matrixProvider = new MatrixProvider(config.matrix, auth, config.media);
                 transportManager.addTransport(matrixProvider);
             }));
         }
@@ -537,7 +537,7 @@ export default function (pi) {
                             }
                             config.matrix = { homeserverUrl, accessToken: matrixAccessToken };
                             saveConfig(config);
-                            const matrixProvider = new MatrixProvider(config.matrix, auth);
+                            const matrixProvider = new MatrixProvider(config.matrix, auth, config.media);
                             transportManager.addTransport(matrixProvider);
                             if (acquireLock()) {
                                 try {

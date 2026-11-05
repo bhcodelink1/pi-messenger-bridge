@@ -7,11 +7,19 @@ import * as os from "os";
 import * as path from "path";
 import { withDeadline } from "../async-util.js";
 import type { ChallengeAuth } from "../auth/challenge-auth.js";
-import type { ExternalMessage } from "../types.js";
+import { formatBytes, resolveMediaSettings } from "../media.js";
+import type {
+  ExternalMessage,
+  MediaSettings,
+  OutgoingMedia,
+  RemoteAttachment,
+} from "../types.js";
 import type { ITransportProvider } from "./interface.js";
+import type { MatrixMediaRef } from "./matrix-utils.js";
 import {
   extractUsername,
   formatForMatrix,
+  mediaFromContent,
   shouldSkipEvent,
   stripBotMention,
   wasBotMentioned,
@@ -37,7 +45,8 @@ export class MatrixProvider implements ITransportProvider {
 
   constructor(
     private config: { homeserverUrl: string; accessToken: string; encryption?: boolean },
-    private auth: ChallengeAuth
+    private auth: ChallengeAuth,
+    private mediaSettings?: MediaSettings
   ) {}
 
   get isConnected(): boolean {
@@ -63,9 +72,14 @@ export class MatrixProvider implements ITransportProvider {
       MatrixClient: MatrixClientCtor,
       RichConsoleLogger,
       RustSdkCryptoStorageProvider: RustSdkCryptoStorageProviderCtor,
-      RustSdkCryptoStoreType,
       SimpleFsStorageProvider,
     } = await import("matrix-bot-sdk");
+
+    // matrix-bot-sdk re-exports RustSdkCryptoStoreType as a type only, so the
+    // named import from it is undefined at runtime. Passing undefined reaches
+    // OlmMachine.initialize and E2EE silently never works, so the enum comes
+    // from the native package that actually defines it.
+    const { StoreType } = await import("@matrix-org/matrix-sdk-crypto-nodejs");
 
     const storagePath = path.join(
       os.homedir(),
@@ -86,7 +100,10 @@ export class MatrixProvider implements ITransportProvider {
           ".pi",
           "msg-bridge-matrix-crypto"
         );
-        cryptoProvider = new RustSdkCryptoStorageProviderCtor(cryptoStorePath, RustSdkCryptoStoreType.Sqlite);
+        cryptoProvider = new RustSdkCryptoStorageProviderCtor(
+          cryptoStorePath,
+          StoreType.Sqlite
+        );
         console.log("[Matrix] E2EE crypto storage enabled (Rust/SQLite)");
       } catch (err) {
         console.warn("[Matrix] E2EE crypto not available, continuing without encryption:", (err as Error).message);
@@ -231,12 +248,118 @@ export class MatrixProvider implements ITransportProvider {
     }
   }
 
+  /**
+   * Send a file to a room.
+   *
+   * Matrix stores bytes in a media repository and references them by `mxc://`
+   * URI, so an upload always precedes the event. In an encrypted room the file
+   * itself is encrypted too, separately from the event: `encryptMedia` produces
+   * the ciphertext plus the key/hash descriptor that goes in `content.file`, and
+   * the ciphertext is what gets uploaded. Sending the plaintext bytes to an
+   * encrypted room would leak the image to the homeserver.
+   */
+  async sendMedia(chatId: string, media: OutgoingMedia): Promise<void> {
+    if (!this.client) {
+      throw new Error("Matrix client not connected");
+    }
+
+    const fileName = media.fileName ?? "file";
+    const caption = media.caption?.trim();
+    const content: Record<string, unknown> = {
+      msgtype: media.mimeType.startsWith("image/") ? "m.image" : "m.file",
+      body: caption || fileName,
+      filename: fileName,
+      info: { mimetype: media.mimeType, size: media.data.length },
+    };
+
+    const crypto = this.client.crypto;
+    // Two reasons not to trust `crypto.isRoomEncrypted`: the SDK's room tracker
+    // only knows a room once it processed the state event, which misses rooms
+    // encrypted before the bot joined, and the per-key state endpoint 404s on an
+    // empty state key. Reading the whole state is the reliable check.
+    let roomIsEncrypted = false;
+    try {
+      const state = await this.client.getRoomState(chatId);
+      roomIsEncrypted = (state ?? []).some(
+        (e: any) =>
+          e?.type === 'm.room.encryption' &&
+          e?.content?.algorithm === 'm.megolm.v1.aes-sha2'
+      );
+    } catch {
+      roomIsEncrypted = crypto
+        ? await crypto.isRoomEncrypted(chatId).catch(() => false)
+        : false;
+    }
+
+    if (roomIsEncrypted && !crypto) {
+      throw new Error(
+        `Room ${chatId} is encrypted but crypto is disabled ("encryption": false), so media cannot be sent safely`
+      );
+    }
+
+    if (roomIsEncrypted && crypto) {
+      const { buffer, file } = await crypto.encryptMedia(media.data);
+      const mxc = await this.client.uploadContent(buffer, "application/octet-stream", fileName);
+      content.file = { ...file, url: mxc };
+    } else {
+      const mxc = await this.client.uploadContent(media.data, media.mimeType, fileName);
+      content.url = mxc;
+    }
+
+    await this.client.sendMessage(chatId, content);
+  }
+
   onMessage(handler: (message: ExternalMessage) => void): void {
     this.messageHandler = handler;
   }
 
   onError(handler: (error: Error) => void): void {
     this.errorHandler = handler;
+  }
+
+  /**
+   * Fetch one media reference and return it as base64.
+   *
+   * An encrypted descriptor has to go through `crypto.decryptMedia`, which
+   * downloads and decrypts in one step. A plain reference downloads straight
+   * from the media repository.
+   */
+  private async downloadAttachment(
+    ref: MatrixMediaRef,
+    settings: MediaSettings
+  ): Promise<RemoteAttachment> {
+    const client = this.client!;
+
+    if (ref.size && ref.size > (settings.maxBytes ?? 0)) {
+      throw new Error(
+        `${ref.fileName ?? "image"} is ${formatBytes(ref.size)}, over the ${formatBytes(
+          settings.maxBytes ?? 0
+        )} limit`
+      );
+    }
+
+    let data: Buffer;
+    if (ref.file && client.crypto) {
+      data = await client.crypto.decryptMedia(ref.file);
+    } else if (ref.mxc) {
+      data = (await client.downloadContent(ref.mxc)).data;
+    } else {
+      throw new Error(`${ref.fileName ?? "image"} carries no media reference`);
+    }
+
+    if (data.length > (settings.maxBytes ?? 0)) {
+      throw new Error(
+        `${ref.fileName ?? "image"} is ${formatBytes(data.length)}, over the ${formatBytes(
+          settings.maxBytes ?? 0
+        )} limit`
+      );
+    }
+
+    return {
+      mimeType: ref.mimeType,
+      data: data.toString("base64"),
+      fileName: ref.fileName,
+    };
   }
 
   private async handleMessage(roomId: string, event: any): Promise<void> {
@@ -249,8 +372,22 @@ export class MatrixProvider implements ITransportProvider {
     const chatId = roomId;
     const userId = event.sender; // e.g. @user:matrix.org
     const username = extractUsername(userId);
-    const messageText = event.content.body;
+    const messageText =
+      typeof event.content.body === "string" ? event.content.body : "";
     const messageId = event.event_id;
+
+    // An image arrives with a media reference and usually no prose. Element puts
+    // the file name in `body`, so the text is kept whatever the media holds.
+    const mediaSettings = resolveMediaSettings(this.mediaSettings);
+    const mediaRef = mediaSettings.enabled ? mediaFromContent(event.content) : null;
+    const attachments: RemoteAttachment[] = [];
+    if (mediaRef) {
+      try {
+        attachments.push(await this.downloadAttachment(mediaRef, mediaSettings));
+      } catch (err) {
+        this.errorHandler?.(new Error((err as Error).message));
+      }
+    }
 
     // Determine if group chat from cached member count (no API call per message)
     let memberCount = this.roomMemberCount.get(roomId);
@@ -285,7 +422,10 @@ export class MatrixProvider implements ITransportProvider {
     );
 
     // Handle challenge codes and commands in DMs
-    if (!isGroupChat && (messageText.startsWith("/") || messageText.match(/^\d{6}$/))) {
+    if (
+      !isGroupChat &&
+      (messageText.startsWith("/") || messageText.match(/^\d{6}$/))
+    ) {
       const handled = await this.auth.handleAdminCommand(
         messageText,
         chatId,
@@ -304,7 +444,7 @@ export class MatrixProvider implements ITransportProvider {
       : messageText;
 
     // Forward to message handler
-    if (this.messageHandler && cleanContent) {
+    if (this.messageHandler && (cleanContent || attachments.length > 0)) {
       const externalMessage: ExternalMessage = {
         chatId,
         transport: this.type,
@@ -315,6 +455,7 @@ export class MatrixProvider implements ITransportProvider {
         messageId,
         isGroupChat,
         wasMentioned,
+        attachments,
       };
 
       this.messageHandler(externalMessage);

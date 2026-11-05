@@ -43,6 +43,36 @@ export function formatForMatrix(text) {
     return { body: text, formattedBody: html };
 }
 /**
+ * Extract an image reference from event content, or null when the event carries
+ * no image worth downloading.
+ *
+ * Photos arrive as `m.image`. A picture sent as a file arrives as `m.file` with
+ * an `image/*` mimetype, which is how Element sends a PNG or SVG that it chose
+ * not to treat as a photo. Everything else (video, audio, arbitrary files) is
+ * ignored because the model has no way to use it.
+ */
+export function mediaFromContent(content) {
+    if (!content?.msgtype)
+        return null;
+    const fileObj = content.file;
+    const mxc = content.url ?? fileObj?.url;
+    if (!mxc)
+        return null;
+    const mimeType = content.info?.mimetype ?? content.mimetype ?? "";
+    const isImage = content.msgtype === "m.image" ||
+        (content.msgtype === "m.file" && mimeType.startsWith("image/"));
+    if (!isImage)
+        return null;
+    const fileName = content.filename ?? (typeof content.body === "string" ? content.body : undefined);
+    return {
+        mxc,
+        file: fileObj ?? undefined,
+        mimeType: mimeType || "image/jpeg",
+        fileName,
+        size: typeof content.info?.size === "number" ? content.info.size : undefined,
+    };
+}
+/**
  * Determine whether to skip a Matrix room event before processing.
  * Returns a reason string if the event should be skipped, or null if it should be processed.
  */
@@ -54,9 +84,14 @@ export function shouldSkipEvent(event, botUserId, connectedAt, joinedRooms, room
     const eventTs = event.origin_server_ts || 0;
     if (eventTs < connectedAt)
         return "stale";
-    // Only process text messages
+    // Text messages, and image messages that carry a file, are both processable.
+    // An image used to fall through to "not_text" here, which meant a photo sent
+    // to the bot produced no reply at all.
     const content = event.content;
-    if (!content || content.msgtype !== "m.text" || !content.body)
+    if (!content?.msgtype)
+        return "not_text";
+    const isText = content.msgtype === "m.text" && !!content.body;
+    if (!isText && !mediaFromContent(content))
         return "not_text";
     // Ignore edits (we only process original messages)
     if (content["m.new_content"])

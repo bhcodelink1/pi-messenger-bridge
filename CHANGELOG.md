@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Image attachments, both directions, on Telegram. A photo sent to the bot is downloaded through `getFile`/`downloadFile` and handed to `pi.sendUserMessage` as an `ImageContent` block, so the model sees the picture instead of the message being dropped. A caption supplies the text, and an image sent as a file keeps its mime type and name. Outbound is a new `send_file` tool that posts a local file to the chat in progress, using `sendPhoto` for formats Telegram previews under 5 MB and `sendDocument` for the rest, which is also the only route for SVG and PDF. `TransportManager.sendMedia` routes it and reports `"<transport> does not support file uploads"` for transports without an implementation. New `media` config block sets `enabled`, `maxBytes` (5 MB), `maxImages` (4) and `sendMaxBytes` (50 MB). `tests/live-telegram.test.ts` runs a real round trip against the bot with `LIVE_TELEGRAM=1`
+- Matrix attachments, both directions. Inbound `m.image` events and `m.file` events with an `image/*` mimetype download from the media repository, through `crypto.decryptMedia` in an encrypted room, and reach the model as `ImageContent`. Outbound `MatrixProvider.sendMedia` uploads via `uploadContent` and posts `m.image` or `m.file`; in an encrypted room it encrypts the bytes with `encryptMedia` first, so the homeserver only ever sees ciphertext. Video, audio and non-image files stay ignored on the way in
+- `tests/live-matrix.test.ts` runs both room types against a real homeserver with `LIVE_MATRIX=1`
+
+### Fixed
+- Matrix E2EE never initialized. `matrix-bot-sdk` re-exports `RustSdkCryptoStoreType` as a *type* only, so the named import evaluated to `undefined` at runtime and that `undefined` reached `OlmMachine.initialize`. The store now takes `StoreType.Sqlite` from `@matrix-org/matrix-sdk-crypto-nodejs`, which is declared as a dependency
 
 ### Fixed
 - A photo sent to the Telegram bot produced no reply at all. `handleMessage` required `msg.text`, and a photo carries `msg.photo` with no `msg.text`, so the guard returned before the authorization check. A captioned photo passed the guard and lost the image, because only `msg.text` was forwarded
