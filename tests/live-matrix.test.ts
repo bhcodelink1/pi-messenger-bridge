@@ -170,7 +170,10 @@ run('live Matrix media, encrypted room', () => {
           invite: [botId],
           preset: 'trusted_private_chat',
         });
-        await user.sendEvent(roomId, 'm.room.encryption', {
+        // sendStateEvent, not sendEvent: m.room.encryption is a state event, and
+        // a homeserver that stores the timeline copy without state_key leaves the
+        // room unencrypted while /messages still shows the event.
+        await user.sendStateEvent(roomId, 'm.room.encryption', '', {
           algorithm: 'm.megolm.v1.aes-sha2',
         });
         await waitFor(async () =>
